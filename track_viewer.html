@@ -13,7 +13,7 @@
     display: flex; height: 100vh; overflow: hidden; background:#0f1115; color:#e6e8eb;
   }
   #sidebar {
-    width: 340px; flex-shrink: 0; padding: 18px; overflow-y: auto;
+    width: 360px; flex-shrink: 0; padding: 18px; overflow-y: auto;
     background: #14171c; border-right: 1px solid #262b33;
   }
   #map { flex: 1; }
@@ -26,6 +26,10 @@
     border-radius: 6px; padding: 8px; font-family: monospace; font-size: 11px; resize: vertical;
   }
   input[type=file] { font-size: 12px; color:#8b93a1; }
+  input[type=number] {
+    width: 100%; background:#1b1f27; color:#e6e8eb; border:1px solid #2c313b;
+    border-radius: 6px; padding: 6px 8px; font-size: 12px; margin-bottom: 4px;
+  }
   button {
     background: #3b82f6; color: white; border: none; border-radius: 6px;
     padding: 8px 12px; font-size: 12px; font-weight: 600; cursor: pointer; margin-top: 8px;
@@ -34,29 +38,41 @@
   button:hover { background: #2f6fd6; }
   button.secondary { background:#2c313b; }
   button.secondary:hover { background:#3a4150; }
+  button.danger { background:#3a1f1f; color:#f87171; }
+  button.danger:hover { background:#4a2626; }
+  button:disabled { background:#20242c; color:#565d68; cursor:not-allowed; }
+  button:disabled:hover { background:#20242c; }
+  .btn-row { display:flex; gap:8px; }
+  .btn-row button { margin-top: 8px; }
+  .mode-toggle { display:flex; gap:6px; margin-bottom: 4px; }
+  .mode-toggle button { margin-top:0; background:#1b1f27; color:#8b93a1; border:1px solid #2c313b; }
+  .mode-toggle button.active { background:#3b82f6; color:#fff; border-color:#3b82f6; }
   .status { font-size: 12px; color:#8b93a1; margin-top: 8px; line-height:1.5;}
   .badge {
     display:inline-block; font-size: 11px; padding: 2px 8px; border-radius: 20px;
     background:#1b2b1f; color:#4ade80; margin-top: 6px;
   }
   .badge.err { background:#2b1b1b; color:#f87171; }
+  .badge.warn { background:#2b2a1b; color:#facc15; }
   .measure-box {
     background:#1b1f27; border:1px solid #2c313b; border-radius: 8px; padding: 12px; margin-top: 10px;
   }
   .measure-row { display:flex; justify-content:space-between; font-size: 12px; margin-bottom:6px; }
   .measure-row .label { color:#8b93a1; }
-  .measure-row .val { font-weight:600; color:#e6e8eb; }
+  .measure-row .val { font-weight:600; color:#e6e8eb; text-align:right; }
   .big-result { font-size: 22px; font-weight: 700; color:#4ade80; margin-top:4px; }
   .hint { font-size: 11px; color:#5c6470; margin-top:6px; line-height:1.5; }
   .legend { font-size: 11px; color:#8b93a1; margin-top:10px; }
-  .legend span { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; vertical-align:middle; }
+  .legend span.dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; vertical-align:middle; }
+  .legend span.line { display:inline-block; width:16px; height:0; border-top:3px solid; margin-right:6px; vertical-align:middle; }
+  .legend div { margin-bottom: 4px; }
 </style>
 </head>
 <body>
 
 <div id="sidebar">
   <h1>Track Viewer</h1>
-  <div class="sub">Load GeoJSON, click two points on the trace to measure distance along it.</div>
+  <div class="sub">Load GeoJSON, then measure distance along the trace.</div>
 
   <div class="section">
     <label>Load GeoJSON file</label>
@@ -68,22 +84,59 @@
   </div>
 
   <div class="section">
-    <label>Measure distance along path</label>
-    <div class="hint">Click a point ON the drawn track to set the start marker (green). Click again elsewhere on the track to set the end marker (red). Distance is computed by following the actual path geometry, not a straight line.</div>
-    <button class="secondary" id="resetMeasure">Reset Points</button>
-    <div class="measure-box" id="measureBox" style="display:none;">
-      <div class="measure-row"><span class="label">Start</span><span class="val" id="startCoord">—</span></div>
-      <div class="measure-row"><span class="label">End</span><span class="val" id="endCoord">—</span></div>
-      <div class="measure-row"><span class="label">Along-path distance</span></div>
-      <div class="big-result" id="distResult">—</div>
-      <div class="measure-row"><span class="label">Straight-line (chord)</span><span class="val" id="chordResult">—</span></div>
+    <label>Stitch disjointed segments</label>
+    <div class="hint">Automatically joins separate line features whose endpoints are within tolerance of each other (e.g. a track split into multiple segments) into continuous paths, so measurements and path traces can cross between them. Runs automatically on load.</div>
+    <label style="margin-top:10px;">Snap tolerance (meters)</label>
+    <input type="number" id="stitchTolerance" value="20" min="0" step="1" />
+    <button class="secondary" id="restitchBtn">Re-stitch Segments</button>
+    <div id="stitchStatus" class="status"></div>
+  </div>
+
+  <div class="section">
+    <label>Measurement mode</label>
+    <div class="mode-toggle">
+      <button id="modeQuickBtn" class="active">Quick (2-point)</button>
+      <button id="modeTraceBtn">Path Trace</button>
+    </div>
+
+    <div id="quickSection">
+      <div class="hint">Click a point ON the drawn track to set the start marker (green). Click again elsewhere on the track to set the end marker (red). Distance is computed by following the actual path geometry, not a straight line.</div>
+      <button class="secondary" id="resetMeasure">Reset Points</button>
+      <div class="measure-box" id="measureBox" style="display:none;">
+        <div class="measure-row"><span class="label">Start</span><span class="val" id="startCoord">—</span></div>
+        <div class="measure-row"><span class="label">End</span><span class="val" id="endCoord">—</span></div>
+        <div class="measure-row"><span class="label">Along-path distance</span></div>
+        <div class="big-result" id="distResult">—</div>
+        <div class="measure-row"><span class="label">Straight-line (chord)</span><span class="val" id="chordResult">—</span></div>
+      </div>
+    </div>
+
+    <div id="traceSection" style="display:none;">
+      <div class="hint">Click "Start Path Trace", then click as many points along the track as you like — even across separate stitched segments. To measure a full loop, click back near your starting point and it will snap closed. Click "Done" to get the total distance.</div>
+      <button id="startTraceBtn">Start Path Trace</button>
+      <div class="btn-row">
+        <button class="secondary" id="undoTraceBtn" disabled>Undo Last Point</button>
+        <button id="doneTraceBtn" disabled>Done</button>
+      </div>
+      <button class="danger" id="clearTraceBtn">Clear All</button>
+      <div class="status" id="traceLiveStatus"></div>
+      <div class="measure-box" id="traceResultBox" style="display:none;">
+        <div class="measure-row"><span class="label">Points</span><span class="val" id="tracePointsResult">—</span></div>
+        <div class="measure-row"><span class="label">Loop closed</span><span class="val" id="traceLoopResult">—</span></div>
+        <div class="measure-row"><span class="label">Total distance</span></div>
+        <div class="big-result" id="traceTotalResult">—</div>
+        <div class="measure-row"><span class="label">Path-following</span><span class="val" id="traceFallbackResult">—</span></div>
+      </div>
     </div>
   </div>
 
   <div class="legend">
-    <span style="background:#3b82f6;"></span> Track geometry<br>
-    <span style="background:#22c55e; margin-top:4px;"></span> Start point<br>
-    <span style="background:#ef4444; margin-top:4px;"></span> End point
+    <div><span class="line" style="border-color:#3b82f6;"></span> Track geometry</div>
+    <div><span class="dot" style="background:#22c55e;"></span> Start point</div>
+    <div><span class="dot" style="background:#ef4444;"></span> End point</div>
+    <div><span class="dot" style="background:#3b82f6;"></span> Trace waypoint</div>
+    <div><span class="line" style="border-color:#facc15;"></span> Measured segment (along path)</div>
+    <div><span class="line" style="border-color:#facc15; border-top-style:dashed;"></span> Measured segment (straight-line fallback)</div>
   </div>
 </div>
 
@@ -97,21 +150,133 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
 }).addTo(map);
 
 let geoLayer = null;
-let allLines = []; // array of turf LineString features (one per original feature, merged if MultiLineString)
+let rawLines = [];  // turf LineString features exactly as parsed, before stitching
+let allLines = [];  // current working set (post-stitch) used for snapping/measuring
+
+let mode = 'quick'; // 'quick' | 'trace'
+
+// --- quick (2-point) mode state ---
 let startPt = null, endPt = null;
 let startMarker = null, endMarker = null;
+let quickSliceLayer = null;
+
+// --- path trace mode state ---
+let traceActive = false;
+let tracePoints = [];        // { snapped, line }
+let traceMarkers = [];
+let traceSegmentLayers = [];
+let traceSegMeta = [];       // { km, fallback } aligned with traceSegmentLayers
+let traceTotalKm = 0;
+let traceFallbackCount = 0;
+let traceLoopClosed = false;
+
+function stitchToleranceKm() {
+  const meters = parseFloat(document.getElementById('stitchTolerance').value) || 0;
+  return meters / 1000;
+}
+
+function distKm(a, b) {
+  return turf.distance(turf.point(a), turf.point(b), { units: 'kilometers' });
+}
+
+// Merge LineString coordinate arrays whose endpoints lie within `toleranceKm`
+// of each other, repeatedly, until no more merges are possible.
+function stitchLines(lines, toleranceKm) {
+  let segments = lines.map(l => l.geometry.coordinates.map(c => c.slice()));
+  const originalCount = segments.length;
+  let merged = true;
+  while (merged) {
+    merged = false;
+    outer:
+    for (let i = 0; i < segments.length; i++) {
+      for (let j = i + 1; j < segments.length; j++) {
+        const a = segments[i], b = segments[j];
+        const aStart = a[0], aEnd = a[a.length - 1];
+        const bStart = b[0], bEnd = b[b.length - 1];
+        const candidates = [
+          { d: distKm(aEnd, bStart), type: 'endStart' },
+          { d: distKm(aEnd, bEnd), type: 'endEnd' },
+          { d: distKm(aStart, bStart), type: 'startStart' },
+          { d: distKm(aStart, bEnd), type: 'startEnd' },
+        ].sort((x, y) => x.d - y.d);
+        const best = candidates[0];
+        if (best.d <= toleranceKm) {
+          let newSeg;
+          if (best.type === 'endStart') newSeg = a.concat(b.slice(1));
+          else if (best.type === 'endEnd') newSeg = a.concat(b.slice(0, -1).reverse());
+          else if (best.type === 'startStart') newSeg = a.slice().reverse().concat(b.slice(1));
+          else newSeg = b.concat(a.slice(1));
+          segments.splice(j, 1);
+          segments.splice(i, 1);
+          segments.push(newSeg);
+          merged = true;
+          break outer;
+        }
+      }
+    }
+  }
+  return {
+    lines: segments.map(coords => turf.lineString(coords)),
+    originalCount,
+    finalCount: segments.length
+  };
+}
+
+function runStitch() {
+  if (rawLines.length === 0) return;
+  const tolKm = stitchToleranceKm();
+  const result = stitchLines(rawLines, tolKm);
+  allLines = result.lines;
+  const mergedAway = result.originalCount - result.finalCount;
+  document.getElementById('stitchStatus').innerHTML = mergedAway > 0
+    ? `<span class="badge">Stitched ${result.originalCount} segment(s) into ${result.finalCount} continuous line(s)</span>`
+    : `<span class="badge">No segments needed stitching (${result.finalCount} line(s) already separate)</span>`;
+  // line references changed, so any in-progress selection is now stale
+  resetQuickPoints();
+  clearTrace();
+}
 
 function clearMap() {
   if (geoLayer) { map.removeLayer(geoLayer); geoLayer = null; }
+  rawLines = [];
   allLines = [];
-  resetMeasurePoints();
+  resetQuickPoints();
+  clearTrace();
+  document.getElementById('stitchStatus').innerHTML = '';
 }
 
-function resetMeasurePoints() {
+function resetQuickPoints() {
   startPt = null; endPt = null;
   if (startMarker) { map.removeLayer(startMarker); startMarker = null; }
   if (endMarker) { map.removeLayer(endMarker); endMarker = null; }
+  if (quickSliceLayer) { map.removeLayer(quickSliceLayer); quickSliceLayer = null; }
   document.getElementById('measureBox').style.display = 'none';
+}
+
+function clearTrace() {
+  traceActive = false;
+  tracePoints = [];
+  traceMarkers.forEach(m => map.removeLayer(m));
+  traceMarkers = [];
+  traceSegmentLayers.forEach(l => map.removeLayer(l));
+  traceSegmentLayers = [];
+  traceSegMeta = [];
+  traceTotalKm = 0;
+  traceFallbackCount = 0;
+  traceLoopClosed = false;
+  document.getElementById('traceResultBox').style.display = 'none';
+  document.getElementById('traceLiveStatus').textContent = '';
+  updateTraceButtons();
+}
+
+function setMode(newMode) {
+  mode = newMode;
+  document.getElementById('quickSection').style.display = mode === 'quick' ? 'block' : 'none';
+  document.getElementById('traceSection').style.display = mode === 'trace' ? 'block' : 'none';
+  document.getElementById('modeQuickBtn').classList.toggle('active', mode === 'quick');
+  document.getElementById('modeTraceBtn').classList.toggle('active', mode === 'trace');
+  resetQuickPoints();
+  clearTrace();
 }
 
 function loadGeoJSON(data, sourceLabel) {
@@ -122,10 +287,10 @@ function loadGeoJSON(data, sourceLabel) {
     feats.forEach(f => {
       if (!f.geometry) return;
       if (f.geometry.type === 'LineString') {
-        allLines.push(turf.lineString(f.geometry.coordinates, f.properties || {}));
+        rawLines.push(turf.lineString(f.geometry.coordinates, f.properties || {}));
       } else if (f.geometry.type === 'MultiLineString') {
         f.geometry.coordinates.forEach(coords => {
-          allLines.push(turf.lineString(coords, f.properties || {}));
+          rawLines.push(turf.lineString(coords, f.properties || {}));
         });
       }
     });
@@ -133,7 +298,7 @@ function loadGeoJSON(data, sourceLabel) {
     geoLayer = L.geoJSON(data, {
       style: { color: '#3b82f6', weight: 3, opacity: 0.9 },
       onEachFeature: (feature, layer) => {
-        layer.on('click', (e) => handleTrackClick(e.latlng));
+        layer.on('click', (e) => handleMapClick(e.latlng));
       }
     }).addTo(map);
 
@@ -141,9 +306,11 @@ function loadGeoJSON(data, sourceLabel) {
       map.fitBounds(geoLayer.getBounds(), { padding: [30, 30] });
     }
 
+    runStitch();
+
     const totalLenKm = allLines.reduce((sum, l) => sum + turf.length(l, { units: 'kilometers' }), 0);
     document.getElementById('loadStatus').innerHTML =
-      `<span class="badge">Loaded ${sourceLabel}: ${feats.length} feature(s), ${allLines.length} line(s), total ${totalLenKm.toFixed(2)} km</span>`;
+      `<span class="badge">Loaded ${sourceLabel}: ${feats.length} feature(s), ${rawLines.length} raw line(s), total ${totalLenKm.toFixed(2)} km</span>`;
   } catch (err) {
     document.getElementById('loadStatus').innerHTML = `<span class="badge err">Error: ${err.message}</span>`;
   }
@@ -163,7 +330,17 @@ function nearestOnAnyLine(latlng) {
   return { snapped: best, line: bestLine };
 }
 
-function handleTrackClick(latlng) {
+function handleMapClick(latlng) {
+  if (mode === 'quick') {
+    handleQuickClick(latlng);
+  } else {
+    handleTraceClick(latlng);
+  }
+}
+
+// ---------------- Quick (2-point) mode ----------------
+
+function handleQuickClick(latlng) {
   const { snapped, line } = nearestOnAnyLine(latlng);
   if (!snapped) return;
   const coord = snapped.geometry.coordinates;
@@ -183,15 +360,14 @@ function handleTrackClick(latlng) {
     marker.addTo(map);
     endMarker = marker;
     document.getElementById('endCoord').textContent = `${coord[1].toFixed(6)}, ${coord[0].toFixed(6)}`;
-    computeDistance();
+    computeQuickDistance();
   } else {
-    // both set already -> start a new measurement
-    resetMeasurePoints();
-    handleTrackClick(latlng);
+    resetQuickPoints();
+    handleQuickClick(latlng);
   }
 }
 
-function computeDistance() {
+function computeQuickDistance() {
   document.getElementById('measureBox').style.display = 'block';
   if (startPt.line !== endPt.line) {
     document.getElementById('distResult').textContent = 'Points are on different line features';
@@ -205,13 +381,149 @@ function computeDistance() {
     document.getElementById('distResult').textContent = `${(alongKm * 1000).toFixed(1)} m  (${alongKm.toFixed(4)} km)`;
     document.getElementById('chordResult').textContent = `${(chordKm * 1000).toFixed(1)} m`;
 
-    // draw the sliced segment as highlight
-    if (window._sliceLayer) map.removeLayer(window._sliceLayer);
-    window._sliceLayer = L.geoJSON(sliced, { style: { color: '#facc15', weight: 5, opacity: 0.9 } }).addTo(map);
+    if (quickSliceLayer) map.removeLayer(quickSliceLayer);
+    quickSliceLayer = L.geoJSON(sliced, { style: { color: '#facc15', weight: 5, opacity: 0.9 } }).addTo(map);
   } catch (err) {
     document.getElementById('distResult').textContent = 'Error: ' + err.message;
   }
 }
+
+// ---------------- Path trace (multi-point) mode ----------------
+
+function loopSnapToleranceKm() {
+  return stitchToleranceKm();
+}
+
+function handleTraceClick(latlng) {
+  if (!traceActive || traceLoopClosed) return;
+  const { snapped, line } = nearestOnAnyLine(latlng);
+  if (!snapped) return;
+
+  if (tracePoints.length >= 2) {
+    const startCoord = tracePoints[0].snapped.geometry.coordinates;
+    const dKm = distKm(snapped.geometry.coordinates, startCoord);
+    if (dKm <= loopSnapToleranceKm()) {
+      snapped.geometry.coordinates = startCoord.slice();
+      addTracePoint(snapped, tracePoints[0].line, true);
+      return;
+    }
+  }
+
+  addTracePoint(snapped, line, false);
+}
+
+function computeSegment(p1, p2) {
+  if (p1.line === p2.line) {
+    try {
+      const sliced = turf.lineSlice(p1.snapped, p2.snapped, p1.line);
+      const km = turf.length(sliced, { units: 'kilometers' });
+      return { km, fallback: false, geojson: sliced };
+    } catch (err) {
+      // fall through to straight-line fallback
+    }
+  }
+  const km = turf.distance(p1.snapped, p2.snapped, { units: 'kilometers' });
+  return { km, fallback: true, geojson: null };
+}
+
+function addTracePoint(snapped, line, isClosing) {
+  const coord = snapped.geometry.coordinates;
+  const idx = tracePoints.length;
+  const marker = L.circleMarker([coord[1], coord[0]], {
+    radius: 6, color: '#fff', weight: 2, fillOpacity: 1,
+    fillColor: idx === 0 ? '#22c55e' : (isClosing ? '#22c55e' : '#3b82f6')
+  }).addTo(map);
+  traceMarkers.push(marker);
+
+  const point = { snapped, line };
+  tracePoints.push(point);
+
+  if (idx > 0) {
+    const prev = tracePoints[idx - 1];
+    const seg = computeSegment(prev, point);
+    traceTotalKm += seg.km;
+    if (seg.fallback) traceFallbackCount++;
+    traceSegMeta.push({ km: seg.km, fallback: seg.fallback });
+
+    let layer;
+    if (seg.geojson) {
+      layer = L.geoJSON(seg.geojson, { style: { color: '#facc15', weight: 5, opacity: 0.9 } }).addTo(map);
+    } else {
+      const prevCoord = prev.snapped.geometry.coordinates;
+      layer = L.polyline(
+        [[prevCoord[1], prevCoord[0]], [coord[1], coord[0]]],
+        { color: '#facc15', weight: 4, opacity: 0.9, dashArray: '6,6' }
+      ).addTo(map);
+    }
+    traceSegmentLayers.push(layer);
+  }
+
+  if (isClosing) traceLoopClosed = true;
+  updateTraceButtons();
+  updateTraceLiveStatus();
+}
+
+function updateTraceLiveStatus() {
+  if (!traceActive) { document.getElementById('traceLiveStatus').textContent = ''; return; }
+  const distTxt = tracePoints.length > 1
+    ? `${(traceTotalKm * 1000).toFixed(1)} m so far`
+    : 'click another point to start measuring';
+  const loopTxt = traceLoopClosed ? ' — loop closed, click Done' : '';
+  document.getElementById('traceLiveStatus').textContent =
+    `${tracePoints.length} point(s) placed. ${distTxt}${loopTxt}`;
+}
+
+function updateTraceButtons() {
+  document.getElementById('undoTraceBtn').disabled = !traceActive || tracePoints.length === 0;
+  document.getElementById('doneTraceBtn').disabled = !traceActive || tracePoints.length < 2;
+  document.getElementById('startTraceBtn').disabled = traceActive;
+}
+
+function startTrace() {
+  clearTrace();
+  traceActive = true;
+  updateTraceButtons();
+  updateTraceLiveStatus();
+}
+
+function undoTracePoint() {
+  if (!traceActive || tracePoints.length === 0) return;
+  const hadSegment = tracePoints.length >= 2;
+  tracePoints.pop();
+  const marker = traceMarkers.pop();
+  if (marker) map.removeLayer(marker);
+
+  if (hadSegment) {
+    const layer = traceSegmentLayers.pop();
+    if (layer) map.removeLayer(layer);
+    const meta = traceSegMeta.pop();
+    if (meta) {
+      traceTotalKm -= meta.km;
+      if (meta.fallback) traceFallbackCount--;
+    }
+  }
+  traceLoopClosed = false;
+  document.getElementById('traceResultBox').style.display = 'none';
+  updateTraceButtons();
+  updateTraceLiveStatus();
+}
+
+function finishTrace() {
+  if (tracePoints.length < 2) return;
+  traceActive = false;
+  document.getElementById('traceResultBox').style.display = 'block';
+  document.getElementById('tracePointsResult').textContent = tracePoints.length;
+  document.getElementById('traceLoopResult').textContent = traceLoopClosed ? 'Yes' : 'No';
+  document.getElementById('traceTotalResult').textContent =
+    `${(traceTotalKm * 1000).toFixed(1)} m  (${traceTotalKm.toFixed(4)} km)`;
+  document.getElementById('traceFallbackResult').textContent = traceFallbackCount > 0
+    ? `${traceFallbackCount} segment(s) used straight-line fallback (try lowering stitch tolerance or re-stitching)`
+    : 'All segments followed path geometry';
+  document.getElementById('traceLiveStatus').textContent = '';
+  updateTraceButtons();
+}
+
+// ---------------- Wiring ----------------
 
 document.getElementById('fileInput').addEventListener('change', (e) => {
   const file = e.target.files[0];
@@ -239,10 +551,19 @@ document.getElementById('loadPasted').addEventListener('click', () => {
   }
 });
 
-document.getElementById('resetMeasure').addEventListener('click', () => {
-  resetMeasurePoints();
-  if (window._sliceLayer) { map.removeLayer(window._sliceLayer); window._sliceLayer = null; }
-});
+document.getElementById('restitchBtn').addEventListener('click', runStitch);
+
+document.getElementById('modeQuickBtn').addEventListener('click', () => setMode('quick'));
+document.getElementById('modeTraceBtn').addEventListener('click', () => setMode('trace'));
+
+document.getElementById('resetMeasure').addEventListener('click', resetQuickPoints);
+
+document.getElementById('startTraceBtn').addEventListener('click', startTrace);
+document.getElementById('undoTraceBtn').addEventListener('click', undoTracePoint);
+document.getElementById('doneTraceBtn').addEventListener('click', finishTrace);
+document.getElementById('clearTraceBtn').addEventListener('click', clearTrace);
+
+updateTraceButtons();
 </script>
 </body>
 </html>

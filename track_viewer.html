@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Track GeoJSON Viewer & Distance Measurer</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Turf.js/6.5.0/turf.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex; height: 100vh; overflow: hidden; background:#0f1115; color:#e6e8eb;
+  }
+  #sidebar {
+    width: 340px; flex-shrink: 0; padding: 18px; overflow-y: auto;
+    background: #14171c; border-right: 1px solid #262b33;
+  }
+  #map { flex: 1; }
+  h1 { font-size: 15px; margin: 0 0 4px 0; font-weight: 600; }
+  .sub { font-size: 12px; color: #8b93a1; margin-bottom: 16px; }
+  .section { margin-bottom: 18px; padding-bottom: 16px; border-bottom: 1px solid #262b33; }
+  label { display:block; font-size: 12px; color:#8b93a1; margin-bottom: 6px; font-weight: 500;}
+  textarea {
+    width: 100%; height: 90px; background:#1b1f27; color:#e6e8eb; border:1px solid #2c313b;
+    border-radius: 6px; padding: 8px; font-family: monospace; font-size: 11px; resize: vertical;
+  }
+  input[type=file] { font-size: 12px; color:#8b93a1; }
+  button {
+    background: #3b82f6; color: white; border: none; border-radius: 6px;
+    padding: 8px 12px; font-size: 12px; font-weight: 600; cursor: pointer; margin-top: 8px;
+    width: 100%;
+  }
+  button:hover { background: #2f6fd6; }
+  button.secondary { background:#2c313b; }
+  button.secondary:hover { background:#3a4150; }
+  .status { font-size: 12px; color:#8b93a1; margin-top: 8px; line-height:1.5;}
+  .badge {
+    display:inline-block; font-size: 11px; padding: 2px 8px; border-radius: 20px;
+    background:#1b2b1f; color:#4ade80; margin-top: 6px;
+  }
+  .badge.err { background:#2b1b1b; color:#f87171; }
+  .measure-box {
+    background:#1b1f27; border:1px solid #2c313b; border-radius: 8px; padding: 12px; margin-top: 10px;
+  }
+  .measure-row { display:flex; justify-content:space-between; font-size: 12px; margin-bottom:6px; }
+  .measure-row .label { color:#8b93a1; }
+  .measure-row .val { font-weight:600; color:#e6e8eb; }
+  .big-result { font-size: 22px; font-weight: 700; color:#4ade80; margin-top:4px; }
+  .hint { font-size: 11px; color:#5c6470; margin-top:6px; line-height:1.5; }
+  .legend { font-size: 11px; color:#8b93a1; margin-top:10px; }
+  .legend span { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; vertical-align:middle; }
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+  <h1>Track Viewer</h1>
+  <div class="sub">Load GeoJSON, click two points on the trace to measure distance along it.</div>
+
+  <div class="section">
+    <label>Load GeoJSON file</label>
+    <input type="file" id="fileInput" accept=".geojson,.json" />
+    <label style="margin-top:12px;">...or paste GeoJSON</label>
+    <textarea id="pasteArea" placeholder='{"type":"FeatureCollection","features":[...]}'></textarea>
+    <button id="loadPasted">Load Pasted GeoJSON</button>
+    <div id="loadStatus" class="status"></div>
+  </div>
+
+  <div class="section">
+    <label>Measure distance along path</label>
+    <div class="hint">Click a point ON the drawn track to set the start marker (green). Click again elsewhere on the track to set the end marker (red). Distance is computed by following the actual path geometry, not a straight line.</div>
+    <button class="secondary" id="resetMeasure">Reset Points</button>
+    <div class="measure-box" id="measureBox" style="display:none;">
+      <div class="measure-row"><span class="label">Start</span><span class="val" id="startCoord">—</span></div>
+      <div class="measure-row"><span class="label">End</span><span class="val" id="endCoord">—</span></div>
+      <div class="measure-row"><span class="label">Along-path distance</span></div>
+      <div class="big-result" id="distResult">—</div>
+      <div class="measure-row"><span class="label">Straight-line (chord)</span><span class="val" id="chordResult">—</span></div>
+    </div>
+  </div>
+
+  <div class="legend">
+    <span style="background:#3b82f6;"></span> Track geometry<br>
+    <span style="background:#22c55e; margin-top:4px;"></span> Start point<br>
+    <span style="background:#ef4444; margin-top:4px;"></span> End point
+  </div>
+</div>
+
+<div id="map"></div>
+
+<script>
+const map = L.map('map', { zoomControl: true }).setView([1.395, 103.895], 14);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; OpenStreetMap contributors',
+  maxZoom: 20
+}).addTo(map);
+
+let geoLayer = null;
+let allLines = []; // array of turf LineString features (one per original feature, merged if MultiLineString)
+let startPt = null, endPt = null;
+let startMarker = null, endMarker = null;
+
+function clearMap() {
+  if (geoLayer) { map.removeLayer(geoLayer); geoLayer = null; }
+  allLines = [];
+  resetMeasurePoints();
+}
+
+function resetMeasurePoints() {
+  startPt = null; endPt = null;
+  if (startMarker) { map.removeLayer(startMarker); startMarker = null; }
+  if (endMarker) { map.removeLayer(endMarker); endMarker = null; }
+  document.getElementById('measureBox').style.display = 'none';
+}
+
+function loadGeoJSON(data, sourceLabel) {
+  clearMap();
+  try {
+    // Normalize to a flat list of LineString features for turf operations
+    const feats = data.type === 'FeatureCollection' ? data.features : [data];
+    feats.forEach(f => {
+      if (!f.geometry) return;
+      if (f.geometry.type === 'LineString') {
+        allLines.push(turf.lineString(f.geometry.coordinates, f.properties || {}));
+      } else if (f.geometry.type === 'MultiLineString') {
+        f.geometry.coordinates.forEach(coords => {
+          allLines.push(turf.lineString(coords, f.properties || {}));
+        });
+      }
+    });
+
+    geoLayer = L.geoJSON(data, {
+      style: { color: '#3b82f6', weight: 3, opacity: 0.9 },
+      onEachFeature: (feature, layer) => {
+        layer.on('click', (e) => handleTrackClick(e.latlng));
+      }
+    }).addTo(map);
+
+    if (geoLayer.getBounds().isValid()) {
+      map.fitBounds(geoLayer.getBounds(), { padding: [30, 30] });
+    }
+
+    const totalLenKm = allLines.reduce((sum, l) => sum + turf.length(l, { units: 'kilometers' }), 0);
+    document.getElementById('loadStatus').innerHTML =
+      `<span class="badge">Loaded ${sourceLabel}: ${feats.length} feature(s), ${allLines.length} line(s), total ${totalLenKm.toFixed(2)} km</span>`;
+  } catch (err) {
+    document.getElementById('loadStatus').innerHTML = `<span class="badge err">Error: ${err.message}</span>`;
+  }
+}
+
+function nearestOnAnyLine(latlng) {
+  const clickPt = turf.point([latlng.lng, latlng.lat]);
+  let best = null, bestDist = Infinity, bestLine = null;
+  allLines.forEach(line => {
+    const snapped = turf.nearestPointOnLine(line, clickPt, { units: 'kilometers' });
+    if (snapped.properties.dist < bestDist) {
+      bestDist = snapped.properties.dist;
+      best = snapped;
+      bestLine = line;
+    }
+  });
+  return { snapped: best, line: bestLine };
+}
+
+function handleTrackClick(latlng) {
+  const { snapped, line } = nearestOnAnyLine(latlng);
+  if (!snapped) return;
+  const coord = snapped.geometry.coordinates;
+  const marker = L.circleMarker([coord[1], coord[0]], {
+    radius: 7, color: '#fff', weight: 2, fillOpacity: 1
+  });
+
+  if (!startPt) {
+    startPt = { point: snapped, line: line };
+    marker.setStyle({ fillColor: '#22c55e' });
+    marker.addTo(map);
+    startMarker = marker;
+    document.getElementById('startCoord').textContent = `${coord[1].toFixed(6)}, ${coord[0].toFixed(6)}`;
+  } else if (!endPt) {
+    endPt = { point: snapped, line: line };
+    marker.setStyle({ fillColor: '#ef4444' });
+    marker.addTo(map);
+    endMarker = marker;
+    document.getElementById('endCoord').textContent = `${coord[1].toFixed(6)}, ${coord[0].toFixed(6)}`;
+    computeDistance();
+  } else {
+    // both set already -> start a new measurement
+    resetMeasurePoints();
+    handleTrackClick(latlng);
+  }
+}
+
+function computeDistance() {
+  document.getElementById('measureBox').style.display = 'block';
+  if (startPt.line !== endPt.line) {
+    document.getElementById('distResult').textContent = 'Points are on different line features';
+    document.getElementById('chordResult').textContent = '—';
+    return;
+  }
+  try {
+    const sliced = turf.lineSlice(startPt.point, endPt.point, startPt.line);
+    const alongKm = turf.length(sliced, { units: 'kilometers' });
+    const chordKm = turf.distance(startPt.point, endPt.point, { units: 'kilometers' });
+    document.getElementById('distResult').textContent = `${(alongKm * 1000).toFixed(1)} m  (${alongKm.toFixed(4)} km)`;
+    document.getElementById('chordResult').textContent = `${(chordKm * 1000).toFixed(1)} m`;
+
+    // draw the sliced segment as highlight
+    if (window._sliceLayer) map.removeLayer(window._sliceLayer);
+    window._sliceLayer = L.geoJSON(sliced, { style: { color: '#facc15', weight: 5, opacity: 0.9 } }).addTo(map);
+  } catch (err) {
+    document.getElementById('distResult').textContent = 'Error: ' + err.message;
+  }
+}
+
+document.getElementById('fileInput').addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (evt) => {
+    try {
+      const data = JSON.parse(evt.target.result);
+      loadGeoJSON(data, file.name);
+    } catch (err) {
+      document.getElementById('loadStatus').innerHTML = `<span class="badge err">Invalid JSON: ${err.message}</span>`;
+    }
+  };
+  reader.readAsText(file);
+});
+
+document.getElementById('loadPasted').addEventListener('click', () => {
+  const text = document.getElementById('pasteArea').value.trim();
+  if (!text) return;
+  try {
+    const data = JSON.parse(text);
+    loadGeoJSON(data, 'pasted GeoJSON');
+  } catch (err) {
+    document.getElementById('loadStatus').innerHTML = `<span class="badge err">Invalid JSON: ${err.message}</span>`;
+  }
+});
+
+document.getElementById('resetMeasure').addEventListener('click', () => {
+  resetMeasurePoints();
+  if (window._sliceLayer) { map.removeLayer(window._sliceLayer); window._sliceLayer = null; }
+});
+</script>
+</body>
+</html>

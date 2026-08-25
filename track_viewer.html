@@ -26,10 +26,11 @@
     border-radius: 6px; padding: 8px; font-family: monospace; font-size: 11px; resize: vertical;
   }
   input[type=file] { font-size: 12px; color:#8b93a1; }
-  input[type=number] {
+  input[type=number], input[type=text] {
     width: 100%; background:#1b1f27; color:#e6e8eb; border:1px solid #2c313b;
     border-radius: 6px; padding: 6px 8px; font-size: 12px; margin-bottom: 4px;
   }
+  input[type=checkbox] { width:auto; margin:0; }
   button {
     background: #3b82f6; color: white; border: none; border-radius: 6px;
     padding: 8px 12px; font-size: 12px; font-weight: 600; cursor: pointer; margin-top: 8px;
@@ -130,8 +131,26 @@
     </div>
   </div>
 
+  <div class="section">
+    <label>Segment &amp; export (track_pipeline.py contract)</label>
+    <div class="hint">Finish a Path Trace above (click along the stitched track — drop extra points wherever you need to follow a curve or bridge a gap, not just at stations), then click "Done". Below, choose which of those waypoints are actual stations; the rest stay in as shape detail inside whichever segment they fall in.</div>
+    <label style="margin-top:10px;">Loop name</label>
+    <input type="text" id="loopNameInput" value="loop_1" />
+    <label style="margin-top:10px;">Authoritative loop length (m)</label>
+    <input type="number" id="loopAuthLenInput" placeholder="survey/odometer-verified, optional" />
+    <button class="secondary" id="buildSegmentsBtn">Build Segment Table from Trace</button>
+
+    <div id="waypointListWrap" style="margin-top:10px;"></div>
+    <div id="stationNamesWrap"></div>
+    <div id="segmentRowsWrap"></div>
+
+    <button id="exportBtn" style="display:none;">Export track.geojson + loop_lengths.csv</button>
+    <div id="exportStatus" class="status"></div>
+  </div>
+
   <div class="legend">
     <div><span class="line" style="border-color:#3b82f6;"></span> Track geometry</div>
+    <div><span class="line" style="border-color:#f97316; border-top-style:dashed;"></span> Stitched discontinuity (gap bridged on load)</div>
     <div><span class="dot" style="background:#22c55e;"></span> Start point</div>
     <div><span class="dot" style="background:#ef4444;"></span> End point</div>
     <div><span class="dot" style="background:#3b82f6;"></span> Trace waypoint</div>
@@ -170,6 +189,13 @@ let traceTotalKm = 0;
 let traceFallbackCount = 0;
 let traceLoopClosed = false;
 
+// --- segment & export state ---
+let segSourcePoints = [];   // frozen copy of tracePoints used to build the segment table
+let segStationFlags = [];   // boolean per waypoint index — true = this waypoint is a station boundary
+let segPointNames = {};     // { [waypointIdx]: name } — only meaningful for flagged (station) indices
+let segFieldState = {};     // { ["idxA_idxB"]: { segId, bidir, lenM } } — user overrides, keyed by station-index pair
+let segGeomCache = {};      // { ["idxA_idxB"]: { coords, km, fallback } }
+
 function stitchToleranceKm() {
   const meters = parseFloat(document.getElementById('stitchTolerance').value) || 0;
   return meters / 1000;
@@ -184,6 +210,7 @@ function distKm(a, b) {
 function stitchLines(lines, toleranceKm) {
   let segments = lines.map(l => l.geometry.coordinates.map(c => c.slice()));
   const originalCount = segments.length;
+  const gaps = []; // { a: [lon,lat], b: [lon,lat], distKm } — the joined endpoint pair at each merge
   let merged = true;
   while (merged) {
     merged = false;
@@ -201,11 +228,12 @@ function stitchLines(lines, toleranceKm) {
         ].sort((x, y) => x.d - y.d);
         const best = candidates[0];
         if (best.d <= toleranceKm) {
-          let newSeg;
-          if (best.type === 'endStart') newSeg = a.concat(b.slice(1));
-          else if (best.type === 'endEnd') newSeg = a.concat(b.slice(0, -1).reverse());
-          else if (best.type === 'startStart') newSeg = a.slice().reverse().concat(b.slice(1));
-          else newSeg = b.concat(a.slice(1));
+          let newSeg, gapA, gapB;
+          if (best.type === 'endStart') { newSeg = a.concat(b.slice(1)); gapA = aEnd; gapB = bStart; }
+          else if (best.type === 'endEnd') { newSeg = a.concat(b.slice(0, -1).reverse()); gapA = aEnd; gapB = bEnd; }
+          else if (best.type === 'startStart') { newSeg = a.slice().reverse().concat(b.slice(1)); gapA = aStart; gapB = bStart; }
+          else { newSeg = b.concat(a.slice(1)); gapA = aStart; gapB = bEnd; }
+          gaps.push({ a: gapA.slice(), b: gapB.slice(), distKm: best.d });
           segments.splice(j, 1);
           segments.splice(i, 1);
           segments.push(newSeg);
@@ -218,18 +246,52 @@ function stitchLines(lines, toleranceKm) {
   return {
     lines: segments.map(coords => turf.lineString(coords)),
     originalCount,
-    finalCount: segments.length
+    finalCount: segments.length,
+    gaps
   };
+}
+
+// Minimum gap distance worth flagging on the map — below this, endpoints are
+// treated as an exact touch rather than a discontinuity that got bridged.
+const STITCH_GAP_HIGHLIGHT_MIN_M = 0.1;
+
+let stitchGapLayers = [];
+
+function clearStitchGapLayers() {
+  stitchGapLayers.forEach(l => map.removeLayer(l));
+  stitchGapLayers = [];
+}
+
+function drawStitchGaps(gaps) {
+  gaps.forEach(g => {
+    const gapM = g.distKm * 1000;
+    const line = L.polyline(
+      [[g.a[1], g.a[0]], [g.b[1], g.b[0]]],
+      { color: '#f97316', weight: 4, opacity: 0.95, dashArray: '3,7' }
+    ).bindTooltip(`Stitched gap: ${gapM.toFixed(2)} m`, { sticky: true });
+    line.addTo(map);
+    stitchGapLayers.push(line);
+    [g.a, g.b].forEach(coord => {
+      const marker = L.circleMarker([coord[1], coord[0]], {
+        radius: 5, color: '#fff', weight: 1.5, fillColor: '#f97316', fillOpacity: 1
+      }).bindTooltip(`Stitched gap: ${gapM.toFixed(2)} m`, { sticky: true });
+      marker.addTo(map);
+      stitchGapLayers.push(marker);
+    });
+  });
 }
 
 function runStitch() {
   if (rawLines.length === 0) return;
+  clearStitchGapLayers();
   const tolKm = stitchToleranceKm();
   const result = stitchLines(rawLines, tolKm);
   allLines = result.lines;
   const mergedAway = result.originalCount - result.finalCount;
+  const flaggedGaps = result.gaps.filter(g => g.distKm * 1000 >= STITCH_GAP_HIGHLIGHT_MIN_M);
+  drawStitchGaps(flaggedGaps);
   document.getElementById('stitchStatus').innerHTML = mergedAway > 0
-    ? `<span class="badge">Stitched ${result.originalCount} segment(s) into ${result.finalCount} continuous line(s)</span>`
+    ? `<span class="badge">Stitched ${result.originalCount} segment(s) into ${result.finalCount} continuous line(s)${flaggedGaps.length ? ` — ${flaggedGaps.length} discontinuity(ies) bridged, highlighted in orange` : ''}</span>`
     : `<span class="badge">No segments needed stitching (${result.finalCount} line(s) already separate)</span>`;
   // line references changed, so any in-progress selection is now stale
   resetQuickPoints();
@@ -240,9 +302,28 @@ function clearMap() {
   if (geoLayer) { map.removeLayer(geoLayer); geoLayer = null; }
   rawLines = [];
   allLines = [];
+  clearStitchGapLayers();
   resetQuickPoints();
   clearTrace();
   document.getElementById('stitchStatus').innerHTML = '';
+}
+
+function resetSegmentState() {
+  segSourcePoints = [];
+  segStationFlags = [];
+  segPointNames = {};
+  segFieldState = {};
+  segGeomCache = {};
+  const wpWrap = document.getElementById('waypointListWrap');
+  const namesWrap = document.getElementById('stationNamesWrap');
+  const rowsWrap = document.getElementById('segmentRowsWrap');
+  if (wpWrap) wpWrap.innerHTML = '';
+  if (namesWrap) namesWrap.innerHTML = '';
+  if (rowsWrap) rowsWrap.innerHTML = '';
+  const exportBtn = document.getElementById('exportBtn');
+  if (exportBtn) exportBtn.style.display = 'none';
+  const exportStatus = document.getElementById('exportStatus');
+  if (exportStatus) exportStatus.innerHTML = '';
 }
 
 function resetQuickPoints() {
@@ -267,6 +348,7 @@ function clearTrace() {
   document.getElementById('traceResultBox').style.display = 'none';
   document.getElementById('traceLiveStatus').textContent = '';
   updateTraceButtons();
+  resetSegmentState();
 }
 
 function setMode(newMode) {
@@ -523,6 +605,293 @@ function finishTrace() {
   updateTraceButtons();
 }
 
+// ---------------- Segment & export ----------------
+
+// Pad a coordinate array to at least `minPts` points by resampling evenly
+// along its length (track_pipeline.py requires >= 4 points per segment).
+function ensureMinPoints(coords, minPts) {
+  if (coords.length >= minPts) return coords;
+  const line = turf.lineString(coords);
+  const totalKm = turf.length(line, { units: 'kilometers' });
+  if (totalKm === 0) {
+    const out = [];
+    for (let i = 0; i < minPts; i++) out.push(coords[0].slice());
+    return out;
+  }
+  const out = [];
+  for (let i = 0; i < minPts; i++) {
+    const frac = i / (minPts - 1);
+    const pt = turf.along(line, totalKm * frac, { units: 'kilometers' });
+    out.push(pt.geometry.coordinates);
+  }
+  return out;
+}
+
+function computeSegmentGeometry(p1, p2) {
+  if (p1.line === p2.line) {
+    try {
+      const sliced = turf.lineSlice(p1.snapped, p2.snapped, p1.line);
+      let coords = sliced.geometry.coordinates.map(c => c.slice());
+      if (coords.length < 2) coords = [p1.snapped.geometry.coordinates.slice(), p2.snapped.geometry.coordinates.slice()];
+      coords = ensureMinPoints(coords, 4);
+      const km = turf.length(turf.lineString(coords), { units: 'kilometers' });
+      return { coords, km, fallback: false };
+    } catch (err) {
+      // fall through to straight-line fallback
+    }
+  }
+  const coords = ensureMinPoints(
+    [p1.snapped.geometry.coordinates.slice(), p2.snapped.geometry.coordinates.slice()], 4
+  );
+  const km = turf.length(turf.lineString(coords), { units: 'kilometers' });
+  return { coords, km, fallback: true };
+}
+
+function sanitizeSegId(s) {
+  return (s || '').trim().replace(/\s+/g, '_');
+}
+function sanitizeLoopName(s) {
+  return (s || 'loop_1').trim();
+}
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+}
+
+// Concatenate the per-click micro-stretches between two station waypoints
+// into one continuous segment geometry, so intermediate (non-station) trace
+// points contribute path detail without becoming segment boundaries.
+function computeMacroSegmentGeometry(idxA, idxB) {
+  let coords = [];
+  let anyFallback = false;
+  for (let a = idxA; a < idxB; a++) {
+    const micro = computeSegmentGeometry(segSourcePoints[a], segSourcePoints[a + 1]);
+    if (micro.fallback) anyFallback = true;
+    const c = coords.length > 0 ? micro.coords.slice(1) : micro.coords;
+    coords = coords.concat(c);
+  }
+  coords = ensureMinPoints(coords, 4);
+  const km = turf.length(turf.lineString(coords), { units: 'kilometers' });
+  return { coords, km, fallback: anyFallback };
+}
+
+function stationIndices() {
+  const out = [];
+  for (let i = 0; i < segStationFlags.length; i++) if (segStationFlags[i]) out.push(i);
+  return out;
+}
+
+function stationName(idx) {
+  const n = segSourcePoints.length;
+  if (traceLoopClosed && idx === n - 1) return stationName(0);
+  const v = segPointNames[idx];
+  return (v && v.trim()) || ('N' + idx);
+}
+
+function buildSegmentTable() {
+  if (traceActive || tracePoints.length < 2) {
+    document.getElementById('exportStatus').innerHTML =
+      '<span class="badge err">Finish a Path Trace first: switch to Path Trace mode, place waypoints along the track, then click Done.</span>';
+    return;
+  }
+  segSourcePoints = tracePoints.slice();
+  const n = segSourcePoints.length;
+  segStationFlags = new Array(n).fill(false);
+  segStationFlags[0] = true;
+  segStationFlags[n - 1] = true;
+  segPointNames = {};
+  segFieldState = {};
+  segGeomCache = {};
+  document.getElementById('exportStatus').innerHTML = '';
+  renderWaypointList();
+  renderStationNames();
+  renderSegmentRows();
+}
+
+function renderWaypointList() {
+  const n = segSourcePoints.length;
+  let html = `<label>Waypoints — check which are stations (${n} placed, ${stationIndices().length} marked as stations)</label>
+    <div class="hint">Everything else stays inside whichever segment it falls in, contributing to that segment's path shape.</div>`;
+  for (let i = 0; i < n; i++) {
+    const coord = segSourcePoints[i].snapped.geometry.coordinates;
+    const forced = i === 0 || i === n - 1;
+    const isMirrored = traceLoopClosed && i === n - 1;
+    html += `<div style="display:flex; gap:6px; align-items:center; margin-bottom:2px;">
+      <input type="checkbox" class="stationFlagInput" data-idx="${i}" ${segStationFlags[i] ? 'checked' : ''} ${forced ? 'disabled' : ''}>
+      <span style="font-size:11px; color:#8b93a1; width:20px; flex-shrink:0;">${i}</span>
+      <span style="font-size:11px; color:#5c6470; flex:1;">${coord[1].toFixed(6)}, ${coord[0].toFixed(6)}${isMirrored ? ' (= point 0, loop closes here)' : ''}${forced ? ' — endpoint, always a station' : ''}</span>
+    </div>`;
+  }
+  document.getElementById('waypointListWrap').innerHTML = html;
+  document.querySelectorAll('.stationFlagInput').forEach(inp => {
+    inp.addEventListener('change', (e) => {
+      const idx = parseInt(e.target.dataset.idx, 10);
+      segStationFlags[idx] = e.target.checked;
+      renderWaypointList();
+      renderStationNames();
+      renderSegmentRows();
+    });
+  });
+}
+
+function renderStationNames() {
+  const idxs = stationIndices();
+  let html = '';
+  for (const idx of idxs) {
+    const isMirrored = traceLoopClosed && idx === segSourcePoints.length - 1;
+    html += `<div style="display:flex; gap:6px; align-items:center; margin-bottom:4px;">
+      <span style="font-size:11px; color:#8b93a1; width:20px; flex-shrink:0;">${idx}</span>
+      <input type="text" class="stationNameInput" data-idx="${idx}" value="${escapeHtml(stationName(idx))}" style="flex:1; margin:0;" ${isMirrored ? 'disabled' : ''}>
+    </div>${isMirrored ? '<div class="hint" style="margin:-2px 0 6px 26px;">= station at point 0 (loop closes here)</div>' : ''}`;
+  }
+  document.getElementById('stationNamesWrap').innerHTML =
+    `<label style="margin-top:10px;">Station names</label>${html}`;
+  document.querySelectorAll('.stationNameInput').forEach(inp => {
+    inp.addEventListener('change', (e) => {
+      const idx = parseInt(e.target.dataset.idx, 10);
+      segPointNames[idx] = e.target.value.trim() || ('N' + idx);
+      renderStationNames();
+      renderSegmentRows();
+    });
+  });
+}
+
+function renderSegmentRows() {
+  const idxs = stationIndices();
+  const loopName = sanitizeLoopName(document.getElementById('loopNameInput').value);
+  let html = '<label style="margin-top:10px;">Segments</label>';
+  for (let s = 0; s < idxs.length - 1; s++) {
+    const idxA = idxs[s], idxB = idxs[s + 1];
+    const key = `${idxA}_${idxB}`;
+    const from = stationName(idxA), to = stationName(idxB);
+    const geo = computeMacroSegmentGeometry(idxA, idxB);
+    segGeomCache[key] = geo;
+    const midCount = idxB - idxA - 1;
+    const defaultSegId = sanitizeSegId(`${loopName}_${from}_${to}`);
+    const prior = segFieldState[key] || {};
+    const segIdVal = prior.segId !== undefined ? prior.segId : defaultSegId;
+    const bidirVal = prior.bidir !== undefined ? prior.bidir : true;
+    const lenMVal = prior.lenM !== undefined ? prior.lenM : '';
+    html += `
+      <div class="measure-box" style="margin-top:8px;">
+        <div class="measure-row"><span class="label">Segment ${s}</span><span class="val">${escapeHtml(from)} → ${escapeHtml(to)}${geo.fallback ? ' ⚠ straight-line' : ''}</span></div>
+        <div class="hint" style="margin-top:0;">${midCount > 0 ? `includes ${midCount} intermediate waypoint(s)` : 'no intermediate waypoints'}</div>
+        <label style="margin-top:6px;">seg_id</label>
+        <input type="text" class="segIdInput" data-idx="${key}" value="${escapeHtml(segIdVal)}">
+        <label style="margin-top:6px; display:flex; align-items:center; gap:6px;">
+          <input type="checkbox" class="bidirInput" data-idx="${key}" ${bidirVal ? 'checked' : ''}> bidir
+        </label>
+        <label style="margin-top:6px;">len_m override (blank = auto-calibrated; raw ${(geo.km * 1000).toFixed(1)} m)</label>
+        <input type="number" class="lenMInput" data-idx="${key}" value="${lenMVal}" placeholder="auto">
+      </div>`;
+  }
+  document.getElementById('segmentRowsWrap').innerHTML = html;
+  document.querySelectorAll('#segmentRowsWrap input').forEach(inp => {
+    inp.addEventListener('input', captureSegFieldState);
+    inp.addEventListener('change', captureSegFieldState);
+  });
+  document.getElementById('exportBtn').style.display = (idxs.length >= 2) ? 'block' : 'none';
+}
+
+function captureSegFieldState(e) {
+  const idx = e.target.dataset.idx;
+  if (idx === undefined) return;
+  if (!segFieldState[idx]) segFieldState[idx] = {};
+  if (e.target.classList.contains('segIdInput')) segFieldState[idx].segId = e.target.value;
+  if (e.target.classList.contains('bidirInput')) segFieldState[idx].bidir = e.target.checked;
+  if (e.target.classList.contains('lenMInput')) segFieldState[idx].lenM = e.target.value;
+}
+
+function downloadFile(filename, content, mime) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function exportSegments() {
+  const idxs = stationIndices();
+  if (idxs.length < 2) return;
+  const loopName = sanitizeLoopName(document.getElementById('loopNameInput').value);
+  const authLenRaw = document.getElementById('loopAuthLenInput').value;
+
+  const segIds = [];
+  const features = [];
+  let fallbackCount = 0;
+  const errors = [];
+
+  for (let s = 0; s < idxs.length - 1; s++) {
+    const idxA = idxs[s], idxB = idxs[s + 1];
+    const key = `${idxA}_${idxB}`;
+    const state = segFieldState[key] || {};
+    const from = stationName(idxA), to = stationName(idxB);
+    const defaultSegId = sanitizeSegId(`${loopName}_${from}_${to}`);
+    let segId = sanitizeSegId(state.segId !== undefined ? state.segId : defaultSegId);
+    if (!segId) segId = defaultSegId;
+    if (segIds.includes(segId)) errors.push(`Duplicate seg_id "${segId}" (segment ${s})`);
+    segIds.push(segId);
+
+    const bidir = state.bidir !== undefined ? state.bidir : true;
+    const lenMRaw = state.lenM;
+    const geo = segGeomCache[key] || computeMacroSegmentGeometry(idxA, idxB);
+    if (geo.fallback) fallbackCount++;
+    if (geo.coords.length < 4) errors.push(`Segment ${s} (${segId}) has fewer than 4 points`);
+
+    const props = { seg_id: segId, order: s, loop: loopName, from, to, bidir: !!bidir };
+    if (lenMRaw !== undefined && lenMRaw !== '' && !isNaN(parseFloat(lenMRaw))) {
+      props.len_m = parseFloat(lenMRaw);
+    }
+    features.push({
+      type: 'Feature',
+      properties: props,
+      geometry: { type: 'LineString', coordinates: geo.coords }
+    });
+  }
+
+  for (let i = 0; i < features.length - 1; i++) {
+    const a = features[i].geometry.coordinates;
+    const b = features[i + 1].geometry.coordinates;
+    const dM = distKm(a[a.length - 1], b[0]) * 1000;
+    if (dM > 0.5) errors.push(`Gap of ${dM.toFixed(2)} m between segment ${i} and ${i + 1} exceeds 0.5 m tolerance`);
+  }
+  if (traceLoopClosed && features.length > 0) {
+    const first = features[0].geometry.coordinates[0];
+    const lastCoords = features[features.length - 1].geometry.coordinates;
+    const last = lastCoords[lastCoords.length - 1];
+    const dM = distKm(first, last) * 1000;
+    if (dM > 0.5) errors.push(`Loop wraparound gap of ${dM.toFixed(2)} m exceeds 0.5 m tolerance`);
+  }
+
+  if (errors.length > 0) {
+    document.getElementById('exportStatus').innerHTML =
+      `<span class="badge err">${errors.length} error(s):<br>${errors.map(escapeHtml).join('<br>')}</span>`;
+    return;
+  }
+
+  const fc = { type: 'FeatureCollection', features };
+  const geojsonStr = JSON.stringify(fc, null, 2);
+
+  const rawTotalM = features.reduce(
+    (sum, f) => sum + turf.length(turf.lineString(f.geometry.coordinates), { units: 'kilometers' }) * 1000, 0
+  );
+  const hasAuthLen = authLenRaw !== '' && !isNaN(parseFloat(authLenRaw));
+  const csvLen = hasAuthLen ? parseFloat(authLenRaw) : rawTotalM;
+  const csv = `loop,authoritative_m\n${loopName},${csvLen.toFixed(1)}\n`;
+
+  downloadFile('track.geojson', geojsonStr, 'application/geo+json');
+  downloadFile('loop_lengths.csv', csv, 'text/csv');
+
+  const notes = [];
+  if (fallbackCount > 0) notes.push(`${fallbackCount} segment(s) used straight-line fallback — verify stitching before production use`);
+  if (!hasAuthLen) notes.push(`loop_lengths.csv used raw GPS-traced length (${rawTotalM.toFixed(1)} m) — replace with a survey/odometer-verified value`);
+  document.getElementById('exportStatus').innerHTML =
+    `<span class="badge${notes.length ? ' warn' : ''}">Exported track.geojson (${features.length} segments) and loop_lengths.csv${notes.length ? '<br>' + notes.map(escapeHtml).join('<br>') : ''}</span>`;
+}
+
 // ---------------- Wiring ----------------
 
 document.getElementById('fileInput').addEventListener('change', (e) => {
@@ -562,6 +931,12 @@ document.getElementById('startTraceBtn').addEventListener('click', startTrace);
 document.getElementById('undoTraceBtn').addEventListener('click', undoTracePoint);
 document.getElementById('doneTraceBtn').addEventListener('click', finishTrace);
 document.getElementById('clearTraceBtn').addEventListener('click', clearTrace);
+
+document.getElementById('buildSegmentsBtn').addEventListener('click', buildSegmentTable);
+document.getElementById('exportBtn').addEventListener('click', exportSegments);
+document.getElementById('loopNameInput').addEventListener('input', () => {
+  if (stationIndices().length >= 2) renderSegmentRows();
+});
 
 updateTraceButtons();
 </script>

@@ -118,13 +118,11 @@
   <div class="sub">Load a path and/or raw GPS points, then measure distance along the trace.</div>
 
   <div class="tab-bar">
-    <button class="tab-btn active" data-tab="data">Data</button>
-    <button class="tab-btn" data-tab="stitch">Stitch</button>
-    <button class="tab-btn" data-tab="measure">Measure</button>
-    <button class="tab-btn" data-tab="export">Export</button>
+    <button class="tab-btn active" data-tab="view">View Map Trace</button>
+    <button class="tab-btn" data-tab="process">Import and Process Map Trace</button>
   </div>
 
-  <div class="tab-panel" id="tabPanel-data">
+  <div class="tab-panel" id="tabPanel-view">
   <div class="section">
     <label>Load path (GeoJSON)</label>
     <input type="file" id="fileInput" accept=".geojson,.json" />
@@ -149,7 +147,7 @@
   </div>
   </div>
 
-  <div class="tab-panel" id="tabPanel-stitch" style="display:none;">
+  <div class="tab-panel" id="tabPanel-process" style="display:none;">
   <div class="section">
     <label>Stitch disjointed segments</label>
     <div class="hint">Automatically joins separate line features whose endpoints are within tolerance of each other (e.g. a track split into multiple segments) into continuous paths, so measurements and path traces can cross between them. Runs automatically on load.</div>
@@ -158,9 +156,7 @@
     <button class="secondary" id="restitchBtn">Re-stitch Segments</button>
     <div id="stitchStatus" class="status"></div>
   </div>
-  </div>
 
-  <div class="tab-panel" id="tabPanel-measure" style="display:none;">
   <div class="section">
     <label>Measurement mode</label>
     <div class="mode-toggle">
@@ -198,9 +194,7 @@
       </div>
     </div>
   </div>
-  </div>
 
-  <div class="tab-panel" id="tabPanel-export" style="display:none;">
   <div class="section">
     <label>Segment &amp; export (track_pipeline.py contract)</label>
     <div class="hint">Finish a Path Trace above (click along the stitched track — drop extra points wherever you need to follow a curve or bridge a gap, not just at stations), then click "Done". Below, choose which of those waypoints are actual stations; the rest stay in as shape detail inside whichever segment they fall in.</div>
@@ -276,7 +270,8 @@ let gpsMarkers = [];
 let gpsVisible = true;
 
 // --- station pin markers (always-visible, labeled) ---
-let stationPinMarkers = [];
+let stationPinMarkers = [];      // stations built here via Path Trace -> segment table
+let uploadedStationMarkers = []; // stations read directly from an uploaded file's from/to properties
 
 // ---------------- Sidebar collapse ----------------
 
@@ -409,6 +404,7 @@ function clearMap() {
   rawLines = [];
   allLines = [];
   clearStitchGapLayers();
+  clearUploadedStationPins();
   resetQuickPoints();
   clearTrace();
   document.getElementById('stitchStatus').innerHTML = '';
@@ -426,6 +422,16 @@ function stationPinIcon() {
   });
 }
 
+// A permanent pin + always-visible name label, used for both trace-built and
+// uploaded stations so they look identical on the map.
+function createStationPinMarker(lat, lon, name) {
+  const marker = L.marker([lat, lon], { icon: stationPinIcon(), zIndexOffset: 1000, interactive: false });
+  marker.bindTooltip(escapeHtml(name), {
+    permanent: true, direction: 'top', offset: [0, -32], className: 'station-pin-label'
+  });
+  return marker;
+}
+
 function clearStationPins() {
   stationPinMarkers.forEach(m => map.removeLayer(m));
   stationPinMarkers = [];
@@ -438,12 +444,44 @@ function renderStationPins() {
   clearStationPins();
   stationIndices().forEach(idx => {
     const coord = segSourcePoints[idx].snapped.geometry.coordinates;
-    const marker = L.marker([coord[1], coord[0]], { icon: stationPinIcon(), zIndexOffset: 1000, interactive: false });
-    marker.bindTooltip(escapeHtml(stationName(idx)), {
-      permanent: true, direction: 'top', offset: [0, -32], className: 'station-pin-label'
-    });
+    const marker = createStationPinMarker(coord[1], coord[0], stationName(idx));
     marker.addTo(map);
     stationPinMarkers.push(marker);
+  });
+}
+
+function clearUploadedStationPins() {
+  uploadedStationMarkers.forEach(m => map.removeLayer(m));
+  uploadedStationMarkers = [];
+}
+
+// A track.geojson produced by (or matching the contract of) this tool's own
+// export carries station names as each LineString segment's from/to
+// properties, with the station's location being that segment's first/last
+// coordinate. Pull those out so previously-exported/stitched stations show
+// up as pins immediately on upload, without re-tracing them by hand.
+function extractStationsFromGeoJSON(data) {
+  const feats = data.type === 'FeatureCollection' ? data.features : [data];
+  const stations = {}; // name -> [lon, lat]
+  feats.forEach(f => {
+    if (!f.geometry || f.geometry.type !== 'LineString') return;
+    const props = f.properties || {};
+    const coords = f.geometry.coordinates;
+    if (coords.length === 0) return;
+    if (props.from) stations[props.from] = coords[0];
+    if (props.to) stations[props.to] = coords[coords.length - 1];
+  });
+  return stations;
+}
+
+function renderUploadedStationPins(stations) {
+  clearUploadedStationPins();
+  Object.keys(stations).forEach(name => {
+    const coord = stations[name];
+    if (!Array.isArray(coord) || coord.length < 2) return;
+    const marker = createStationPinMarker(coord[1], coord[0], name);
+    marker.addTo(map);
+    uploadedStationMarkers.push(marker);
   });
 }
 
@@ -530,9 +568,15 @@ function loadGeoJSON(data, sourceLabel) {
 
     runStitch();
 
+    const uploadedStations = extractStationsFromGeoJSON(data);
+    const stationNames = Object.keys(uploadedStations);
+    if (stationNames.length > 0) renderUploadedStationPins(uploadedStations);
+
     const totalLenKm = allLines.reduce((sum, l) => sum + turf.length(l, { units: 'kilometers' }), 0);
     document.getElementById('loadStatus').innerHTML =
-      `<span class="badge">Loaded ${sourceLabel}: ${feats.length} feature(s), ${rawLines.length} raw line(s), total ${totalLenKm.toFixed(2)} km</span>`;
+      `<span class="badge">Loaded ${sourceLabel}: ${feats.length} feature(s), ${rawLines.length} raw line(s), total ${totalLenKm.toFixed(2)} km` +
+      (stationNames.length > 0 ? ` — ${stationNames.length} station(s) detected from from/to properties` : '') +
+      `</span>`;
   } catch (err) {
     document.getElementById('loadStatus').innerHTML = `<span class="badge err">Error: ${err.message}</span>`;
   }

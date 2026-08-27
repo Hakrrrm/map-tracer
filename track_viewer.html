@@ -113,10 +113,10 @@
 
   <div class="section">
     <label>Load raw GPS points</label>
-    <div class="hint">Import raw GPS fixes to view superimposed on the map and the path above, for comparison. Accepts GeoJSON (Point/MultiPoint), GPX (trkpt/wpt/rtept), or CSV with lat/lon columns.</div>
-    <input type="file" id="gpsFileInput" accept=".geojson,.json,.gpx,.csv,.txt" />
-    <label style="margin-top:12px;">...or paste GeoJSON / CSV</label>
-    <textarea id="gpsPasteArea" placeholder="lat,lon&#10;1.395000,103.895000&#10;1.396000,103.896000"></textarea>
+    <div class="hint">Import raw GPS fixes to view superimposed on the map and the path above, for comparison. Accepts GeoJSON (Point/MultiPoint), NDJSON (one point object or GeoJSON Point per line), GPX (trkpt/wpt/rtept), or CSV with lat/lon columns.</div>
+    <input type="file" id="gpsFileInput" accept=".geojson,.json,.ndjson,.jsonl,.gpx,.csv,.txt" />
+    <label style="margin-top:12px;">...or paste GeoJSON / NDJSON / CSV</label>
+    <textarea id="gpsPasteArea" placeholder='{"lat":1.395000,"lon":103.895000}&#10;{"lat":1.396000,"lon":103.896000}'></textarea>
     <button id="loadGpsPasted">Load Pasted GPS Data</button>
     <div id="gpsLoadStatus" class="status"></div>
     <div class="btn-row">
@@ -751,6 +751,42 @@ function parseGeoJsonPoints(data) {
   return points;
 }
 
+// One JSON value per line — either a flat {lat,lon[,time]} object (accepting
+// latitude/longitude/lng aliases) or a GeoJSON Point/Feature per line.
+function parseNdjsonPoints(text) {
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+  const points = [];
+  lines.forEach(line => {
+    let obj;
+    try { obj = JSON.parse(line); } catch (err) { return; }
+    if (obj && obj.type && obj.geometry) {
+      points.push(...parseGeoJsonPoints(obj));
+    } else if (obj && obj.type === 'Point' && Array.isArray(obj.coordinates)) {
+      points.push(...parseGeoJsonPoints({ type: 'Feature', geometry: obj, properties: {} }));
+    } else if (obj && typeof obj === 'object') {
+      const lat = obj.lat ?? obj.latitude;
+      const lon = obj.lon ?? obj.lng ?? obj.long ?? obj.longitude;
+      if (Number.isFinite(lat) && Number.isFinite(lon)) {
+        points.push({ lat, lon, time: obj.time || obj.timestamp || null });
+      }
+    }
+  });
+  return points;
+}
+
+// A line-delimited file is JSON-per-line but not valid as a single JSON
+// document (a real GeoJSON FeatureCollection parses fine as a whole).
+function looksLikeNdjson(text) {
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+  if (lines.length < 1) return false;
+  try {
+    JSON.parse(lines[0]);
+  } catch (err) {
+    return false;
+  }
+  return true;
+}
+
 function loadGpsData(text, filename) {
   try {
     const trimmed = text.trim();
@@ -758,8 +794,17 @@ function loadGpsData(text, filename) {
     let points;
     if (lower.endsWith('.gpx') || trimmed.startsWith('<')) {
       points = parseGpxPoints(trimmed);
+    } else if (lower.endsWith('.ndjson') || lower.endsWith('.jsonl')) {
+      points = parseNdjsonPoints(trimmed);
     } else if (lower.endsWith('.geojson') || lower.endsWith('.json') || trimmed.startsWith('{') || trimmed.startsWith('[')) {
-      points = parseGeoJsonPoints(JSON.parse(trimmed));
+      try {
+        points = parseGeoJsonPoints(JSON.parse(trimmed));
+      } catch (err) {
+        if (looksLikeNdjson(trimmed)) points = parseNdjsonPoints(trimmed);
+        else throw err;
+      }
+    } else if (looksLikeNdjson(trimmed)) {
+      points = parseNdjsonPoints(trimmed);
     } else {
       points = parseCsvPoints(trimmed);
     }

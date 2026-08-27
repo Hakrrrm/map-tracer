@@ -13,19 +13,41 @@
     display: flex; height: 100vh; overflow: hidden; background:#0f1115; color:#e6e8eb;
   }
   #sidebar {
-    width: 360px; flex-shrink: 0; padding: 18px; overflow-y: auto;
+    width: 360px; flex-shrink: 0; padding: 18px; overflow-y: auto; overflow-x: hidden;
     background: #14171c; border-right: 1px solid #262b33;
+    transition: width 0.22s ease, padding 0.22s ease, border-color 0.22s ease;
+    white-space: nowrap;
   }
-  #map { flex: 1; }
-  h1 { font-size: 15px; margin: 0 0 4px 0; font-weight: 600; }
-  .sub { font-size: 12px; color: #8b93a1; margin-bottom: 16px; }
+  #sidebar.collapsed {
+    width: 0; padding-left: 0; padding-right: 0; border-right-color: transparent;
+  }
+  #sidebar.collapsed .sidebar-inner { opacity: 0; pointer-events: none; }
+  .sidebar-inner { width: 324px; opacity: 1; transition: opacity 0.15s ease; }
+  #map { flex: 1; position: relative; }
+  .sidebar-header { display:flex; align-items:center; justify-content:space-between; margin-bottom: 4px; }
+  h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  .icon-btn {
+    width: 30px; height: 30px; flex-shrink: 0; border-radius: 6px; background:#1b1f27; color:#e6e8eb;
+    border: 1px solid #2c313b; cursor: pointer; font-size: 14px; display:flex; align-items:center; justify-content:center;
+    padding: 0; margin: 0;
+  }
+  .icon-btn:hover { background:#2c313b; }
+  #openSidebarBtn {
+    position: fixed; top: 14px; left: 14px; z-index: 1000;
+    width: 38px; height: 38px; border-radius: 8px; background:#14171c; color:#e6e8eb;
+    border: 1px solid #262b33; cursor: pointer; font-size: 16px; display:none; align-items:center; justify-content:center;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+  }
+  #openSidebarBtn:hover { background:#1b1f27; }
+  .sub { font-size: 12px; color: #8b93a1; margin-bottom: 16px; white-space: normal; }
   .section { margin-bottom: 18px; padding-bottom: 16px; border-bottom: 1px solid #262b33; }
   label { display:block; font-size: 12px; color:#8b93a1; margin-bottom: 6px; font-weight: 500;}
   textarea {
-    width: 100%; height: 90px; background:#1b1f27; color:#e6e8eb; border:1px solid #2c313b;
+    width: 100%; height: 80px; background:#1b1f27; color:#e6e8eb; border:1px solid #2c313b;
     border-radius: 6px; padding: 8px; font-family: monospace; font-size: 11px; resize: vertical;
+    white-space: pre; overflow-wrap: normal;
   }
-  input[type=file] { font-size: 12px; color:#8b93a1; }
+  input[type=file] { font-size: 12px; color:#8b93a1; max-width: 100%; }
   input[type=number] {
     width: 100%; background:#1b1f27; color:#e6e8eb; border:1px solid #2c313b;
     border-radius: 6px; padding: 6px 8px; font-size: 12px; margin-bottom: 4px;
@@ -33,7 +55,7 @@
   button {
     background: #3b82f6; color: white; border: none; border-radius: 6px;
     padding: 8px 12px; font-size: 12px; font-weight: 600; cursor: pointer; margin-top: 8px;
-    width: 100%;
+    width: 100%; white-space: normal;
   }
   button:hover { background: #2f6fd6; }
   button.secondary { background:#2c313b; }
@@ -47,10 +69,10 @@
   .mode-toggle { display:flex; gap:6px; margin-bottom: 4px; }
   .mode-toggle button { margin-top:0; background:#1b1f27; color:#8b93a1; border:1px solid #2c313b; }
   .mode-toggle button.active { background:#3b82f6; color:#fff; border-color:#3b82f6; }
-  .status { font-size: 12px; color:#8b93a1; margin-top: 8px; line-height:1.5;}
+  .status { font-size: 12px; color:#8b93a1; margin-top: 8px; line-height:1.5; white-space: normal; }
   .badge {
     display:inline-block; font-size: 11px; padding: 2px 8px; border-radius: 20px;
-    background:#1b2b1f; color:#4ade80; margin-top: 6px;
+    background:#1b2b1f; color:#4ade80; margin-top: 6px; white-space: normal;
   }
   .badge.err { background:#2b1b1b; color:#f87171; }
   .badge.warn { background:#2b2a1b; color:#facc15; }
@@ -61,8 +83,8 @@
   .measure-row .label { color:#8b93a1; }
   .measure-row .val { font-weight:600; color:#e6e8eb; text-align:right; }
   .big-result { font-size: 22px; font-weight: 700; color:#4ade80; margin-top:4px; }
-  .hint { font-size: 11px; color:#5c6470; margin-top:6px; line-height:1.5; }
-  .legend { font-size: 11px; color:#8b93a1; margin-top:10px; }
+  .hint { font-size: 11px; color:#5c6470; margin-top:6px; line-height:1.5; white-space: normal; }
+  .legend { font-size: 11px; color:#8b93a1; margin-top:10px; white-space: normal; }
   .legend span.dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; vertical-align:middle; }
   .legend span.line { display:inline-block; width:16px; height:0; border-top:3px solid; margin-right:6px; vertical-align:middle; }
   .legend div { margin-bottom: 4px; }
@@ -70,17 +92,37 @@
 </head>
 <body>
 
+<button id="openSidebarBtn" title="Show sidebar">☰</button>
+
 <div id="sidebar">
-  <h1>Track Viewer</h1>
-  <div class="sub">Load GeoJSON, then measure distance along the trace.</div>
+<div class="sidebar-inner">
+  <div class="sidebar-header">
+    <h1>Track Viewer</h1>
+    <button class="icon-btn" id="closeSidebarBtn" title="Collapse sidebar">✕</button>
+  </div>
+  <div class="sub">Load a path and/or raw GPS points, then measure distance along the trace.</div>
 
   <div class="section">
-    <label>Load GeoJSON file</label>
+    <label>Load path (GeoJSON)</label>
     <input type="file" id="fileInput" accept=".geojson,.json" />
     <label style="margin-top:12px;">...or paste GeoJSON</label>
     <textarea id="pasteArea" placeholder='{"type":"FeatureCollection","features":[...]}'></textarea>
     <button id="loadPasted">Load Pasted GeoJSON</button>
     <div id="loadStatus" class="status"></div>
+  </div>
+
+  <div class="section">
+    <label>Load raw GPS points</label>
+    <div class="hint">Import raw GPS fixes to view superimposed on the map and the path above, for comparison. Accepts GeoJSON (Point/MultiPoint), GPX (trkpt/wpt/rtept), or CSV with lat/lon columns.</div>
+    <input type="file" id="gpsFileInput" accept=".geojson,.json,.gpx,.csv,.txt" />
+    <label style="margin-top:12px;">...or paste GeoJSON / CSV</label>
+    <textarea id="gpsPasteArea" placeholder="lat,lon&#10;1.395000,103.895000&#10;1.396000,103.896000"></textarea>
+    <button id="loadGpsPasted">Load Pasted GPS Data</button>
+    <div id="gpsLoadStatus" class="status"></div>
+    <div class="btn-row">
+      <button class="secondary" id="toggleGpsBtn">Hide GPS Points</button>
+      <button class="danger" id="clearGpsBtn">Clear GPS Points</button>
+    </div>
   </div>
 
   <div class="section">
@@ -137,7 +179,9 @@
     <div><span class="dot" style="background:#3b82f6;"></span> Trace waypoint</div>
     <div><span class="line" style="border-color:#facc15;"></span> Measured segment (along path)</div>
     <div><span class="line" style="border-color:#facc15; border-top-style:dashed;"></span> Measured segment (straight-line fallback)</div>
+    <div><span class="dot" style="background:#f97316;"></span> Raw GPS point</div>
   </div>
+</div>
 </div>
 
 <div id="map"></div>
@@ -169,6 +213,24 @@ let traceSegMeta = [];       // { km, fallback } aligned with traceSegmentLayers
 let traceTotalKm = 0;
 let traceFallbackCount = 0;
 let traceLoopClosed = false;
+
+// --- raw GPS points state ---
+let gpsPoints = [];   // { lat, lon, time }
+let gpsMarkers = [];
+let gpsVisible = true;
+
+// ---------------- Sidebar collapse ----------------
+
+function setSidebarOpen(open) {
+  document.getElementById('sidebar').classList.toggle('collapsed', !open);
+  document.getElementById('openSidebarBtn').style.display = open ? 'none' : 'flex';
+  setTimeout(() => map.invalidateSize(), 240);
+}
+
+document.getElementById('closeSidebarBtn').addEventListener('click', () => setSidebarOpen(false));
+document.getElementById('openSidebarBtn').addEventListener('click', () => setSidebarOpen(true));
+
+// ---------------- Stitching ----------------
 
 function stitchToleranceKm() {
   const meters = parseFloat(document.getElementById('stitchTolerance').value) || 0;
@@ -523,6 +585,124 @@ function finishTrace() {
   updateTraceButtons();
 }
 
+// ---------------- Raw GPS points ----------------
+
+function clearGps() {
+  gpsPoints = [];
+  gpsMarkers.forEach(m => map.removeLayer(m));
+  gpsMarkers = [];
+  gpsVisible = true;
+  document.getElementById('toggleGpsBtn').textContent = 'Hide GPS Points';
+  document.getElementById('gpsLoadStatus').innerHTML = '';
+}
+
+function renderGpsPoints() {
+  gpsMarkers.forEach(m => map.removeLayer(m));
+  gpsMarkers = gpsPoints.map(p => {
+    const marker = L.circleMarker([p.lat, p.lon], {
+      radius: 4, color: '#fff', weight: 1, fillColor: '#f97316', fillOpacity: 0.9
+    });
+    if (p.time) marker.bindTooltip(String(p.time), { direction: 'top', opacity: 0.9 });
+    if (gpsVisible) marker.addTo(map);
+    return marker;
+  });
+}
+
+function toggleGpsVisibility() {
+  gpsVisible = !gpsVisible;
+  gpsMarkers.forEach(m => {
+    if (gpsVisible) { if (!map.hasLayer(m)) m.addTo(map); }
+    else if (map.hasLayer(m)) { map.removeLayer(m); }
+  });
+  document.getElementById('toggleGpsBtn').textContent = gpsVisible ? 'Hide GPS Points' : 'Show GPS Points';
+}
+
+function parseCsvPoints(text) {
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+  if (lines.length === 0) return [];
+  const headerCells = lines[0].split(',').map(c => c.trim().toLowerCase());
+  let latIdx = headerCells.findIndex(c => c === 'lat' || c === 'latitude');
+  let lonIdx = headerCells.findIndex(c => c === 'lon' || c === 'lng' || c === 'long' || c === 'longitude');
+  let timeIdx = headerCells.findIndex(c => c === 'time' || c === 'timestamp');
+  let startRow = 1;
+  if (latIdx === -1 || lonIdx === -1) {
+    latIdx = 0; lonIdx = 1; timeIdx = -1; startRow = 0; // no recognizable header, assume lat,lon,...
+  }
+  const points = [];
+  for (let i = startRow; i < lines.length; i++) {
+    const cells = lines[i].split(',').map(c => c.trim());
+    const lat = parseFloat(cells[latIdx]);
+    const lon = parseFloat(cells[lonIdx]);
+    if (Number.isFinite(lat) && Number.isFinite(lon)) {
+      points.push({ lat, lon, time: timeIdx >= 0 ? cells[timeIdx] : null });
+    }
+  }
+  return points;
+}
+
+function parseGpxPoints(text) {
+  const xml = new DOMParser().parseFromString(text, 'application/xml');
+  if (xml.querySelector('parsererror')) throw new Error('Invalid GPX/XML');
+  const points = [];
+  xml.querySelectorAll('trkpt, wpt, rtept').forEach(el => {
+    const lat = parseFloat(el.getAttribute('lat'));
+    const lon = parseFloat(el.getAttribute('lon'));
+    if (Number.isFinite(lat) && Number.isFinite(lon)) {
+      const timeEl = el.querySelector('time');
+      points.push({ lat, lon, time: timeEl ? timeEl.textContent : null });
+    }
+  });
+  return points;
+}
+
+function parseGeoJsonPoints(data) {
+  const points = [];
+  const feats = data.type === 'FeatureCollection' ? data.features
+    : (data.type === 'Feature' ? [data] : [{ type: 'Feature', geometry: data, properties: {} }]);
+  feats.forEach(f => {
+    if (!f.geometry) return;
+    if (f.geometry.type === 'Point') {
+      const [lon, lat] = f.geometry.coordinates;
+      const props = f.properties || {};
+      points.push({ lat, lon, time: props.time || props.timestamp || null });
+    } else if (f.geometry.type === 'MultiPoint') {
+      f.geometry.coordinates.forEach(([lon, lat]) => points.push({ lat, lon, time: null }));
+    }
+  });
+  return points;
+}
+
+function loadGpsData(text, filename) {
+  try {
+    const trimmed = text.trim();
+    const lower = (filename || '').toLowerCase();
+    let points;
+    if (lower.endsWith('.gpx') || trimmed.startsWith('<')) {
+      points = parseGpxPoints(trimmed);
+    } else if (lower.endsWith('.geojson') || lower.endsWith('.json') || trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      points = parseGeoJsonPoints(JSON.parse(trimmed));
+    } else {
+      points = parseCsvPoints(trimmed);
+    }
+    if (points.length === 0) throw new Error('No valid lat/lon points found');
+
+    gpsPoints = gpsPoints.concat(points);
+    gpsVisible = true;
+    document.getElementById('toggleGpsBtn').textContent = 'Hide GPS Points';
+    renderGpsPoints();
+
+    if (!geoLayer) {
+      const bounds = L.latLngBounds(gpsPoints.map(p => [p.lat, p.lon]));
+      if (bounds.isValid()) map.fitBounds(bounds, { padding: [30, 30] });
+    }
+
+    document.getElementById('gpsLoadStatus').innerHTML =
+      `<span class="badge">Loaded ${points.length} GPS point(s) from ${filename || 'pasted data'} (total: ${gpsPoints.length})</span>`;
+  } catch (err) {
+    document.getElementById('gpsLoadStatus').innerHTML = `<span class="badge err">Error: ${err.message}</span>`;
+  }
+}
+
 // ---------------- Wiring ----------------
 
 document.getElementById('fileInput').addEventListener('change', (e) => {
@@ -550,6 +730,23 @@ document.getElementById('loadPasted').addEventListener('click', () => {
     document.getElementById('loadStatus').innerHTML = `<span class="badge err">Invalid JSON: ${err.message}</span>`;
   }
 });
+
+document.getElementById('gpsFileInput').addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (evt) => loadGpsData(evt.target.result, file.name);
+  reader.readAsText(file);
+});
+
+document.getElementById('loadGpsPasted').addEventListener('click', () => {
+  const text = document.getElementById('gpsPasteArea').value;
+  if (!text.trim()) return;
+  loadGpsData(text, null);
+});
+
+document.getElementById('toggleGpsBtn').addEventListener('click', toggleGpsVisibility);
+document.getElementById('clearGpsBtn').addEventListener('click', clearGps);
 
 document.getElementById('restitchBtn').addEventListener('click', runStitch);
 

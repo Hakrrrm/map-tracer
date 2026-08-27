@@ -13,11 +13,14 @@ You can also load raw GPS points to view them superimposed on the map and the pa
 
 The sidebar can be collapsed (✕ button in its header) to give the map more room, and reopened with the ☰ button that appears in the top-left corner.
 
+Once a Path Trace is finished, the "Segment & export" panel lets you mark which of the placed waypoints are actual stations (the rest stay in as shape detail within whichever segment they fall in), name each station, and export a `track.geojson` + `loop_lengths.csv` pair matching the `track_pipeline.py` contract.
+
 Features:
 - Renders GeoJSON `LineString`/`MultiLineString` tracks on a Leaflet map
 - Collapsible sidebar
 - Import raw GPS points (GeoJSON, GPX, or CSV) and view them superimposed on the map and path, with a toggle to show/hide them and a way to clear them independently of the loaded path
-- Auto-stitches disjointed line segments (e.g. a track split into multiple features) into continuous paths whose endpoints are within a configurable tolerance, so measurements can cross between them; re-run stitching with a different tolerance at any time
+- Auto-stitches disjointed line segments (e.g. a track split into multiple features) into continuous paths whose endpoints are within a configurable tolerance, so measurements can cross between them; re-run stitching with a different tolerance at any time; bridged discontinuities are highlighted on the map
 - Quick 2-point along-path and straight-line (chord) distance measurement
 - Multi-point path trace across stitched segments, with loop-closing snap and a running/total distance
 - Falls back to straight-line distance for any trace segment whose points aren't on a connected/stitched line, and flags it in the result
+- Build a station/segment table from a finished trace and export it as `track.geojson` + `loop_lengths.csv`

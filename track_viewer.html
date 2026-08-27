@@ -69,6 +69,16 @@
   .mode-toggle { display:flex; gap:6px; margin-bottom: 4px; }
   .mode-toggle button { margin-top:0; background:#1b1f27; color:#8b93a1; border:1px solid #2c313b; }
   .mode-toggle button.active { background:#3b82f6; color:#fff; border-color:#3b82f6; }
+  .tab-bar {
+    display:flex; flex-wrap:wrap; gap:4px; margin-bottom: 14px; padding-bottom: 14px;
+    border-bottom: 1px solid #262b33;
+  }
+  .tab-btn {
+    flex: 1 1 auto; margin-top:0; background:#1b1f27; color:#8b93a1; border:1px solid #2c313b;
+    font-size: 11px; padding: 7px 8px;
+  }
+  .tab-btn.active { background:#3b82f6; color:#fff; border-color:#3b82f6; }
+  .tab-panel .section:last-child { margin-bottom: 0; padding-bottom: 0; border-bottom: none; }
   .status { font-size: 12px; color:#8b93a1; margin-top: 8px; line-height:1.5; white-space: normal; }
   .badge {
     display:inline-block; font-size: 11px; padding: 2px 8px; border-radius: 20px;
@@ -88,6 +98,11 @@
   .legend span.dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; vertical-align:middle; }
   .legend span.line { display:inline-block; width:16px; height:0; border-top:3px solid; margin-right:6px; vertical-align:middle; }
   .legend div { margin-bottom: 4px; }
+  .station-pin-label {
+    background:#14171c; color:#facc15; border:1px solid #78350f; font-weight:700;
+    font-size:11px; padding:2px 7px; border-radius:4px; box-shadow: 0 1px 4px rgba(0,0,0,0.5);
+  }
+  .leaflet-tooltip.station-pin-label.leaflet-tooltip-top:before { border-top-color:#78350f; }
 </style>
 </head>
 <body>
@@ -102,6 +117,14 @@
   </div>
   <div class="sub">Load a path and/or raw GPS points, then measure distance along the trace.</div>
 
+  <div class="tab-bar">
+    <button class="tab-btn active" data-tab="data">Data</button>
+    <button class="tab-btn" data-tab="stitch">Stitch</button>
+    <button class="tab-btn" data-tab="measure">Measure</button>
+    <button class="tab-btn" data-tab="export">Export</button>
+  </div>
+
+  <div class="tab-panel" id="tabPanel-data">
   <div class="section">
     <label>Load path (GeoJSON)</label>
     <input type="file" id="fileInput" accept=".geojson,.json" />
@@ -124,7 +147,9 @@
       <button class="danger" id="clearGpsBtn">Clear GPS Points</button>
     </div>
   </div>
+  </div>
 
+  <div class="tab-panel" id="tabPanel-stitch" style="display:none;">
   <div class="section">
     <label>Stitch disjointed segments</label>
     <div class="hint">Automatically joins separate line features whose endpoints are within tolerance of each other (e.g. a track split into multiple segments) into continuous paths, so measurements and path traces can cross between them. Runs automatically on load.</div>
@@ -133,7 +158,9 @@
     <button class="secondary" id="restitchBtn">Re-stitch Segments</button>
     <div id="stitchStatus" class="status"></div>
   </div>
+  </div>
 
+  <div class="tab-panel" id="tabPanel-measure" style="display:none;">
   <div class="section">
     <label>Measurement mode</label>
     <div class="mode-toggle">
@@ -171,7 +198,9 @@
       </div>
     </div>
   </div>
+  </div>
 
+  <div class="tab-panel" id="tabPanel-export" style="display:none;">
   <div class="section">
     <label>Segment &amp; export (track_pipeline.py contract)</label>
     <div class="hint">Finish a Path Trace above (click along the stitched track — drop extra points wherever you need to follow a curve or bridge a gap, not just at stations), then click "Done". Below, choose which of those waypoints are actual stations; the rest stay in as shape detail inside whichever segment they fall in.</div>
@@ -188,6 +217,7 @@
     <button id="exportBtn" style="display:none;">Export track.geojson + loop_lengths.csv</button>
     <div id="exportStatus" class="status"></div>
   </div>
+  </div>
 
   <div class="legend">
     <div><span class="line" style="border-color:#3b82f6;"></span> Track geometry</div>
@@ -198,6 +228,7 @@
     <div><span class="line" style="border-color:#facc15;"></span> Measured segment (along path)</div>
     <div><span class="line" style="border-color:#facc15; border-top-style:dashed;"></span> Measured segment (straight-line fallback)</div>
     <div><span class="dot" style="background:#f97316;"></span> Raw GPS point</div>
+    <div><span class="dot" style="background:#facc15; border:1.5px solid #78350f;"></span> Station (pin stays on map, labeled)</div>
   </div>
 </div>
 </div>
@@ -244,6 +275,9 @@ let gpsPoints = [];   // { lat, lon, time }
 let gpsMarkers = [];
 let gpsVisible = true;
 
+// --- station pin markers (always-visible, labeled) ---
+let stationPinMarkers = [];
+
 // ---------------- Sidebar collapse ----------------
 
 function setSidebarOpen(open) {
@@ -254,6 +288,19 @@ function setSidebarOpen(open) {
 
 document.getElementById('closeSidebarBtn').addEventListener('click', () => setSidebarOpen(false));
 document.getElementById('openSidebarBtn').addEventListener('click', () => setSidebarOpen(true));
+
+// ---------------- Sidebar tabs ----------------
+
+function switchTab(name) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+  document.querySelectorAll('.tab-panel').forEach(p => {
+    p.style.display = (p.id === 'tabPanel-' + name) ? 'block' : 'none';
+  });
+}
+
+document.querySelectorAll('.tab-btn').forEach(b => {
+  b.addEventListener('click', () => switchTab(b.dataset.tab));
+});
 
 function stitchToleranceKm() {
   const meters = parseFloat(document.getElementById('stitchTolerance').value) || 0;
@@ -367,12 +414,46 @@ function clearMap() {
   document.getElementById('stitchStatus').innerHTML = '';
 }
 
+function stationPinIcon() {
+  return L.divIcon({
+    className: 'station-pin-icon',
+    html: `<svg width="26" height="34" viewBox="0 0 26 34" xmlns="http://www.w3.org/2000/svg">
+      <path d="M13 0C5.8 0 0 5.8 0 13c0 9.2 13 21 13 21s13-11.8 13-21C26 5.8 20.2 0 13 0z" fill="#facc15" stroke="#78350f" stroke-width="1.5"/>
+      <circle cx="13" cy="12.5" r="4.5" fill="#78350f"/>
+    </svg>`,
+    iconSize: [26, 34],
+    iconAnchor: [13, 34]
+  });
+}
+
+function clearStationPins() {
+  stationPinMarkers.forEach(m => map.removeLayer(m));
+  stationPinMarkers = [];
+}
+
+// Renders a permanent pin + always-visible name label for every waypoint
+// currently flagged as a station, so stations stand out on the map without
+// needing a hover — independent of (and drawn above) the trace waypoints.
+function renderStationPins() {
+  clearStationPins();
+  stationIndices().forEach(idx => {
+    const coord = segSourcePoints[idx].snapped.geometry.coordinates;
+    const marker = L.marker([coord[1], coord[0]], { icon: stationPinIcon(), zIndexOffset: 1000, interactive: false });
+    marker.bindTooltip(escapeHtml(stationName(idx)), {
+      permanent: true, direction: 'top', offset: [0, -32], className: 'station-pin-label'
+    });
+    marker.addTo(map);
+    stationPinMarkers.push(marker);
+  });
+}
+
 function resetSegmentState() {
   segSourcePoints = [];
   segStationFlags = [];
   segPointNames = {};
   segFieldState = {};
   segGeomCache = {};
+  clearStationPins();
   const wpWrap = document.getElementById('waypointListWrap');
   const namesWrap = document.getElementById('stationNamesWrap');
   const rowsWrap = document.getElementById('segmentRowsWrap');
@@ -927,6 +1008,7 @@ function buildSegmentTable() {
   renderWaypointList();
   renderStationNames();
   renderSegmentRows();
+  renderStationPins();
 }
 
 function renderWaypointList() {
@@ -951,6 +1033,7 @@ function renderWaypointList() {
       renderWaypointList();
       renderStationNames();
       renderSegmentRows();
+      renderStationPins();
     });
   });
 }
@@ -973,6 +1056,7 @@ function renderStationNames() {
       segPointNames[idx] = e.target.value.trim() || ('N' + idx);
       renderStationNames();
       renderSegmentRows();
+      renderStationPins();
     });
   });
 }

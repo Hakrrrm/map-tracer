@@ -215,7 +215,7 @@
 
   <div class="legend">
     <div><span class="line" style="border-color:#3b82f6;"></span> Track geometry</div>
-    <div><span class="line" style="border-color:#f97316; border-top-style:dashed;"></span> Stitched discontinuity (gap bridged on load)</div>
+    <div><span class="line" style="border-color:#d946ef; border-top-style:dashed;"></span> Stitched discontinuity (gap bridged on load)</div>
     <div><span class="dot" style="background:#22c55e;"></span> Start point</div>
     <div><span class="dot" style="background:#ef4444;"></span> End point</div>
     <div><span class="dot" style="background:#3b82f6;"></span> Trace waypoint</div>
@@ -368,13 +368,13 @@ function drawStitchGaps(gaps) {
     const gapM = g.distKm * 1000;
     const line = L.polyline(
       [[g.a[1], g.a[0]], [g.b[1], g.b[0]]],
-      { color: '#f97316', weight: 4, opacity: 0.95, dashArray: '3,7' }
+      { color: '#d946ef', weight: 4, opacity: 0.95, dashArray: '3,7' }
     ).bindTooltip(`Stitched gap: ${gapM.toFixed(2)} m`, { sticky: true });
     line.addTo(map);
     stitchGapLayers.push(line);
     [g.a, g.b].forEach(coord => {
       const marker = L.circleMarker([coord[1], coord[0]], {
-        radius: 5, color: '#fff', weight: 1.5, fillColor: '#f97316', fillOpacity: 1
+        radius: 5, color: '#fff', weight: 1.5, fillColor: '#d946ef', fillOpacity: 1
       }).bindTooltip(`Stitched gap: ${gapM.toFixed(2)} m`, { sticky: true });
       marker.addTo(map);
       stitchGapLayers.push(marker);
@@ -392,7 +392,7 @@ function runStitch() {
   const flaggedGaps = result.gaps.filter(g => g.distKm * 1000 >= STITCH_GAP_HIGHLIGHT_MIN_M);
   drawStitchGaps(flaggedGaps);
   document.getElementById('stitchStatus').innerHTML = mergedAway > 0
-    ? `<span class="badge">Stitched ${result.originalCount} segment(s) into ${result.finalCount} continuous line(s)${flaggedGaps.length ? ` — ${flaggedGaps.length} discontinuity(ies) bridged, highlighted in orange` : ''}</span>`
+    ? `<span class="badge">Stitched ${result.originalCount} segment(s) into ${result.finalCount} continuous line(s)${flaggedGaps.length ? ` — ${flaggedGaps.length} discontinuity(ies) bridged, highlighted in purple` : ''}</span>`
     : `<span class="badge">No segments needed stitching (${result.finalCount} line(s) already separate)</span>`;
   // line references changed, so any in-progress selection is now stale
   resetQuickPoints();

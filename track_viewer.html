@@ -391,9 +391,14 @@ function stitchLines(lines, toleranceKm, manualJoinPairs) {
     const segStart = seg[0], segEnd = seg[seg.length - 1];
     const d = distKm(segStart, segEnd);
     const manualHit = findManualJoin(manualJoinPairs, segStart, segEnd);
-    if (d > 0 && (manualHit || d <= toleranceKm)) {
+    if (manualHit || d <= toleranceKm) {
       seg._isLoop = true;
-      gaps.push({ a: segEnd.slice(), b: segStart.slice(), distKm: d, manual: !!manualHit, selfClose: true });
+      // A genuinely zero (or ~identical-coordinate) gap is already seamless —
+      // nothing to bridge, so no purple gap marker for it. Only flag it when
+      // there's an actual, visible distance between the two ends.
+      if (d > COORD_IDENTITY_TOLERANCE_KM) {
+        gaps.push({ a: segEnd.slice(), b: segStart.slice(), distKm: d, manual: !!manualHit, selfClose: true });
+      }
     }
   });
 

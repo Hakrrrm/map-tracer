@@ -225,6 +225,7 @@
   <div class="legend">
     <div><span class="line" style="border-color:#60a5fa;"></span> Track geometry (each continuous line gets its own color — a color change marks an unbridged discontinuity)</div>
     <div><span class="line" style="border-color:#d946ef; border-top-style:dashed;"></span> Stitched discontinuity (auto or manual)</div>
+    <div><span class="dot" style="background:#8b93a1;"></span> Loose end (color matches its line) — not yet joined to anything</div>
     <div><span class="dot" style="background:#22d3ee;"></span> Manual stitch: first endpoint picked</div>
     <div><span class="dot" style="background:#22c55e;"></span> Start point</div>
     <div><span class="dot" style="background:#ef4444;"></span> End point</div>
@@ -379,8 +380,25 @@ function stitchLines(lines, toleranceKm, manualJoinPairs) {
       }
     }
   }
+  // A single already-merged segment's own start and end are never compared
+  // against each other above (the pairwise loop only ever compares two
+  // DIFFERENT segments) — so a loop whose recorded start/end sit near each
+  // other (e.g. a round-trip track) never gets flagged or closed by the
+  // merge above. Check each final segment's self-closure separately, and
+  // tag it so lineSlice-based measuring can route around the seam instead
+  // of picking the long way around (see computeSegment/computeQuickDistance).
+  segments.forEach(seg => {
+    const segStart = seg[0], segEnd = seg[seg.length - 1];
+    const d = distKm(segStart, segEnd);
+    const manualHit = findManualJoin(manualJoinPairs, segStart, segEnd);
+    if (d > 0 && (manualHit || d <= toleranceKm)) {
+      seg._isLoop = true;
+      gaps.push({ a: segEnd.slice(), b: segStart.slice(), distKm: d, manual: !!manualHit, selfClose: true });
+    }
+  });
+
   return {
-    lines: segments.map(coords => turf.lineString(coords)),
+    lines: segments.map(coords => turf.lineString(coords, { isLoop: !!coords._isLoop })),
     originalCount,
     finalCount: segments.length,
     gaps
@@ -400,20 +418,18 @@ function clearStitchGapLayers() {
 
 // ---------------- Manual stitch ----------------
 
-// Finds the single closest line endpoint (start or end of any current line)
-// to a click, regardless of which line's rendered path was actually hit —
-// same "snap to the globally nearest thing" pattern used elsewhere in the app.
-function nearestEndpoint(latlng) {
+// Picks whichever end (start or end) of `line` is nearer to the click. Used
+// instead of a global nearest-endpoint search because at a junction with
+// several close, near-parallel lines (e.g. a rail depot), searching across
+// ALL lines' endpoints is ambiguous and can silently pick the wrong line's
+// endpoint. Since every click always arrives already tied to the specific
+// rendered line it landed on (see renderStitchedLines), restricting to that
+// exact line removes the ambiguity entirely.
+function nearestEndpointOnLine(latlng, line) {
   const clickPt = [latlng.lng, latlng.lat];
-  let best = null, bestDist = Infinity;
-  allLines.forEach(line => {
-    const coords = line.geometry.coordinates;
-    [coords[0], coords[coords.length - 1]].forEach(coord => {
-      const d = distKm(clickPt, coord);
-      if (d < bestDist) { bestDist = d; best = coord; }
-    });
-  });
-  return best;
+  const coords = line.geometry.coordinates;
+  const start = coords[0], end = coords[coords.length - 1];
+  return distKm(clickPt, start) <= distKm(clickPt, end) ? start : end;
 }
 
 function clearManualStitchPickMarker() {
@@ -470,8 +486,9 @@ function stopManualStitch() {
   updateManualStitchStatus();
 }
 
-function handleManualStitchClick(latlng) {
-  const coord = nearestEndpoint(latlng);
+function handleManualStitchClick(latlng, clickedLine) {
+  if (!clickedLine) return;
+  const coord = nearestEndpointOnLine(latlng, clickedLine);
   if (!coord) return;
 
   if (!manualStitchFirst) {
@@ -495,7 +512,9 @@ function handleManualStitchClick(latlng) {
 function drawStitchGaps(gaps) {
   gaps.forEach(g => {
     const gapM = g.distKm * 1000;
-    const label = g.manual ? `Manual join: ${gapM.toFixed(2)} m` : `Stitched gap: ${gapM.toFixed(2)} m`;
+    const label = g.selfClose
+      ? (g.manual ? `Manual loop closure: ${gapM.toFixed(2)} m` : `Loop closure gap: ${gapM.toFixed(2)} m`)
+      : (g.manual ? `Manual join: ${gapM.toFixed(2)} m` : `Stitched gap: ${gapM.toFixed(2)} m`);
     const line = L.polyline(
       [[g.a[1], g.a[0]], [g.b[1], g.b[0]]],
       { color: '#d946ef', weight: 4, opacity: 0.95, dashArray: '3,7' }
@@ -535,9 +554,39 @@ function renderStitchedLines() {
     const color = STITCHED_LINE_COLORS[idx % STITCHED_LINE_COLORS.length];
     const latlngs = line.geometry.coordinates.map(c => [c[1], c[0]]);
     const layer = L.polyline(latlngs, { color, weight: 4, opacity: 0.9 });
-    layer.on('click', (e) => handleMapClick(e.latlng));
+    layer.on('click', (e) => handleMapClick(e.latlng, line));
     layer.addTo(map);
     stitchedLineLayers.push(layer);
+  });
+}
+
+let lineEndpointMarkers = [];
+
+function clearLineEndpointMarkers() {
+  lineEndpointMarkers.forEach(m => map.removeLayer(m));
+  lineEndpointMarkers = [];
+}
+
+// A gap wider than the auto tolerance (or a loop-closing gap too small to
+// trip STITCH_GAP_HIGHLIGHT_MIN_M) never gets a purple highlight — so on its
+// own it's invisible. Mark every line's own two loose ends explicitly, in
+// that line's color, so there's always something to see and click for
+// Manual Stitch even when nothing got auto-flagged.
+function renderLineEndpointMarkers() {
+  clearLineEndpointMarkers();
+  allLines.forEach((line, idx) => {
+    const color = STITCHED_LINE_COLORS[idx % STITCHED_LINE_COLORS.length];
+    const coords = line.geometry.coordinates;
+    // A loop already gets its own closure marked by the purple gap markers
+    // (drawStitchGaps) — no need for a redundant endpoint dot on top of it.
+    if (line.properties && line.properties.isLoop) return;
+    [coords[0], coords[coords.length - 1]].forEach(coord => {
+      const marker = L.circleMarker([coord[1], coord[0]], {
+        radius: 6, color: '#fff', weight: 2, fillColor: color, fillOpacity: 1, interactive: false
+      }).bindTooltip('Loose end — use Manual Stitch to join it to another', { direction: 'top', opacity: 0.85 });
+      marker.addTo(map);
+      lineEndpointMarkers.push(marker);
+    });
   });
 }
 
@@ -548,12 +597,14 @@ function runStitch() {
   const result = stitchLines(rawLines, tolKm, manualJoinPairs);
   allLines = result.lines;
   renderStitchedLines();
+  renderLineEndpointMarkers();
   const mergedAway = result.originalCount - result.finalCount;
-  const flaggedGaps = result.gaps.filter(g => g.manual || g.distKm * 1000 >= STITCH_GAP_HIGHLIGHT_MIN_M);
+  const flaggedGaps = result.gaps.filter(g => g.manual || g.selfClose || g.distKm * 1000 >= STITCH_GAP_HIGHLIGHT_MIN_M);
   drawStitchGaps(flaggedGaps);
-  const manualCount = result.gaps.filter(g => g.manual).length;
-  document.getElementById('stitchStatus').innerHTML = mergedAway > 0
-    ? `<span class="badge">Stitched ${result.originalCount} segment(s) into ${result.finalCount} continuous line(s)${flaggedGaps.length ? ` — ${flaggedGaps.length} discontinuity(ies) bridged${manualCount ? ` (${manualCount} manual)` : ''}, highlighted in purple` : ''}${result.finalCount > 1 ? ` — each line is drawn in its own color; a color change marks a remaining discontinuity` : ''}</span>`
+  const manualCount = result.gaps.filter(g => g.manual && !g.selfClose).length;
+  const selfCloseCount = result.gaps.filter(g => g.selfClose).length;
+  document.getElementById('stitchStatus').innerHTML = (mergedAway > 0 || flaggedGaps.length > 0)
+    ? `<span class="badge">Stitched ${result.originalCount} segment(s) into ${result.finalCount} continuous line(s)${flaggedGaps.length ? ` — ${flaggedGaps.length} discontinuity(ies) bridged${manualCount ? ` (${manualCount} manual)` : ''}${selfCloseCount ? `, ${selfCloseCount} closing a loop` : ''}, highlighted in purple` : ''}${result.finalCount > 1 ? ` — each line is drawn in its own color; a color change marks a remaining discontinuity` : ''}</span>`
     : `<span class="badge">No segments needed stitching (${result.finalCount} line(s) already separate)</span>`;
   // line references changed, so any in-progress selection is now stale
   resetQuickPoints();
@@ -564,6 +615,7 @@ function runStitch() {
 function clearMap() {
   geoLayer = null;
   clearStitchedLineLayers();
+  clearLineEndpointMarkers();
   rawLines = [];
   allLines = [];
   clearStitchGapLayers();
@@ -747,8 +799,55 @@ function loadGeoJSON(data, sourceLabel) {
   }
 }
 
-function nearestOnAnyLine(latlng) {
+// turf.lineSlice always returns the piece of the line "between" the two
+// points in coordinate-array order — for a line whose own start/end are
+// close together (flagged `isLoop` in stitchLines), two points that sit near
+// opposite ends of that array are actually close together via the seam, but
+// lineSlice has no notion of that and hands back almost the entire line
+// instead. When the wrap-around distance is shorter, build that piece
+// explicitly by slicing from each point out to its nearer end of the line,
+// then joining across the seam.
+function sliceAlongLine(p1, p2, line) {
+  if (
+    line.properties && line.properties.isLoop &&
+    p1.properties && typeof p1.properties.location === 'number' &&
+    p2.properties && typeof p2.properties.location === 'number'
+  ) {
+    const totalKm = turf.length(line, { units: 'kilometers' });
+    const loc1 = p1.properties.location;
+    const loc2 = p2.properties.location;
+    const forwardKm = Math.abs(loc1 - loc2);
+    const wrapKm = totalKm - forwardKm;
+    if (wrapKm > 0 && wrapKm < forwardKm) {
+      const lo = Math.min(loc1, loc2);
+      const hi = Math.max(loc1, loc2);
+      // Either piece can be degenerate (zero-length) when a point sits
+      // exactly at the line's own start (lo === 0) or end (hi === totalKm) —
+      // lineSliceAlong throws on a zero-length slice, so skip it instead.
+      const EPS_KM = 1e-9;
+      const parts = [];
+      if (totalKm - hi > EPS_KM) parts.push(turf.lineSliceAlong(line, hi, totalKm).geometry.coordinates);
+      if (lo > EPS_KM) parts.push(turf.lineSliceAlong(line, 0, lo).geometry.coordinates);
+      if (parts.length > 0) {
+        return turf.lineString(parts.reduce((acc, c) => acc.concat(c)));
+      }
+    }
+  }
+  return turf.lineSlice(p1, p2, line);
+}
+
+// `preferredLine`, when given, restricts snapping to exactly that line
+// instead of searching across all of them. Every click always arrives tied
+// to the specific rendered line it landed on (see renderStitchedLines), so
+// passing it through avoids snapping onto the wrong line at a junction with
+// several close, near-parallel lines (e.g. a rail depot) — searching
+// globally there is genuinely ambiguous and can silently pick a neighboring
+// track instead of the one actually clicked.
+function nearestOnAnyLine(latlng, preferredLine) {
   const clickPt = turf.point([latlng.lng, latlng.lat]);
+  if (preferredLine) {
+    return { snapped: turf.nearestPointOnLine(preferredLine, clickPt, { units: 'kilometers' }), line: preferredLine };
+  }
   let best = null, bestDist = Infinity, bestLine = null;
   allLines.forEach(line => {
     const snapped = turf.nearestPointOnLine(line, clickPt, { units: 'kilometers' });
@@ -761,20 +860,20 @@ function nearestOnAnyLine(latlng) {
   return { snapped: best, line: bestLine };
 }
 
-function handleMapClick(latlng) {
+function handleMapClick(latlng, clickedLine) {
   if (manualStitchActive) {
-    handleManualStitchClick(latlng);
+    handleManualStitchClick(latlng, clickedLine);
   } else if (mode === 'quick') {
-    handleQuickClick(latlng);
+    handleQuickClick(latlng, clickedLine);
   } else {
-    handleTraceClick(latlng);
+    handleTraceClick(latlng, clickedLine);
   }
 }
 
 // ---------------- Quick (2-point) mode ----------------
 
-function handleQuickClick(latlng) {
-  const { snapped, line } = nearestOnAnyLine(latlng);
+function handleQuickClick(latlng, clickedLine) {
+  const { snapped, line } = nearestOnAnyLine(latlng, clickedLine);
   if (!snapped) return;
   const coord = snapped.geometry.coordinates;
   const marker = L.circleMarker([coord[1], coord[0]], {
@@ -796,7 +895,7 @@ function handleQuickClick(latlng) {
     computeQuickDistance();
   } else {
     resetQuickPoints();
-    handleQuickClick(latlng);
+    handleQuickClick(latlng, clickedLine);
   }
 }
 
@@ -808,7 +907,7 @@ function computeQuickDistance() {
     return;
   }
   try {
-    const sliced = turf.lineSlice(startPt.point, endPt.point, startPt.line);
+    const sliced = sliceAlongLine(startPt.point, endPt.point, startPt.line);
     const alongKm = turf.length(sliced, { units: 'kilometers' });
     const chordKm = turf.distance(startPt.point, endPt.point, { units: 'kilometers' });
     document.getElementById('distResult').textContent = `${(alongKm * 1000).toFixed(1)} m  (${alongKm.toFixed(4)} km)`;
@@ -827,17 +926,21 @@ function loopSnapToleranceKm() {
   return stitchToleranceKm();
 }
 
-function handleTraceClick(latlng) {
+function handleTraceClick(latlng, clickedLine) {
   if (!traceActive || traceLoopClosed) return;
-  const { snapped, line } = nearestOnAnyLine(latlng);
+  const { snapped, line } = nearestOnAnyLine(latlng, clickedLine);
   if (!snapped) return;
 
   if (tracePoints.length >= 2) {
     const startCoord = tracePoints[0].snapped.geometry.coordinates;
     const dKm = distKm(snapped.geometry.coordinates, startCoord);
     if (dKm <= loopSnapToleranceKm()) {
-      snapped.geometry.coordinates = startCoord.slice();
-      addTracePoint(snapped, tracePoints[0].line, true);
+      // Reuse the original start point's own snap result (coordinates AND its
+      // along-line `location`) rather than this click's — this click's location
+      // is near wherever the loop happens to be, not the true start's position,
+      // and sliceAlongLine needs the real one to detect the short way around.
+      const closingPoint = JSON.parse(JSON.stringify(tracePoints[0].snapped));
+      addTracePoint(closingPoint, tracePoints[0].line, true);
       return;
     }
   }
@@ -848,7 +951,7 @@ function handleTraceClick(latlng) {
 function computeSegment(p1, p2) {
   if (p1.line === p2.line) {
     try {
-      const sliced = turf.lineSlice(p1.snapped, p2.snapped, p1.line);
+      const sliced = sliceAlongLine(p1.snapped, p2.snapped, p1.line);
       const km = turf.length(sliced, { units: 'kilometers' });
       return { km, fallback: false, geojson: sliced };
     } catch (err) {

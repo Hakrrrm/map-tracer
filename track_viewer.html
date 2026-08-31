@@ -158,6 +158,15 @@
   </div>
 
   <div class="section">
+    <label>Manual stitch</label>
+    <div class="hint">For gaps too large for the tolerance above: click "Start Manual Stitch", then click one loose line endpoint, then click the endpoint you want it joined to. Repeat for as many pairs as needed — manual joins are kept even when you change the tolerance or click "Re-stitch Segments", until you remove them below.</div>
+    <button id="manualStitchBtn">Start Manual Stitch</button>
+    <div class="status" id="manualStitchStatus"></div>
+    <div id="manualJoinListWrap"></div>
+    <button class="danger" id="clearManualJoinsBtn">Clear Manual Joins</button>
+  </div>
+
+  <div class="section">
     <label>Measurement mode</label>
     <div class="mode-toggle">
       <button id="modeQuickBtn" class="active">Quick (2-point)</button>
@@ -215,7 +224,8 @@
 
   <div class="legend">
     <div><span class="line" style="border-color:#3b82f6;"></span> Track geometry</div>
-    <div><span class="line" style="border-color:#d946ef; border-top-style:dashed;"></span> Stitched discontinuity (gap bridged on load)</div>
+    <div><span class="line" style="border-color:#d946ef; border-top-style:dashed;"></span> Stitched discontinuity (auto or manual)</div>
+    <div><span class="dot" style="background:#22d3ee;"></span> Manual stitch: first endpoint picked</div>
     <div><span class="dot" style="background:#22c55e;"></span> Start point</div>
     <div><span class="dot" style="background:#ef4444;"></span> End point</div>
     <div><span class="dot" style="background:#3b82f6;"></span> Trace waypoint</div>
@@ -273,6 +283,12 @@ let gpsVisible = true;
 let stationPinMarkers = [];      // stations built here via Path Trace -> segment table
 let uploadedStationMarkers = []; // stations read directly from an uploaded file's from/to properties
 
+// --- manual stitch state ---
+let manualJoinPairs = [];       // { a: [lon,lat], b: [lon,lat] } — user-declared endpoint pairs, force-merged
+let manualStitchActive = false;
+let manualStitchFirst = null;   // { coord } of the first endpoint picked, awaiting a second click
+let manualStitchPickMarker = null;
+
 // ---------------- Sidebar collapse ----------------
 
 function setSidebarOpen(open) {
@@ -306,12 +322,28 @@ function distKm(a, b) {
   return turf.distance(turf.point(a), turf.point(b), { units: 'kilometers' });
 }
 
+// Treat two coordinates as the "same point" for matching a manual join back
+// to the raw endpoints it was drawn between (well under any real gap size).
+const COORD_IDENTITY_TOLERANCE_KM = 0.0001; // ~0.1 m
+
+function coordsMatch(a, b) {
+  return distKm(a, b) < COORD_IDENTITY_TOLERANCE_KM;
+}
+
+function findManualJoin(manualJoinPairs, ca, cb) {
+  return manualJoinPairs.find(p =>
+    (coordsMatch(p.a, ca) && coordsMatch(p.b, cb)) ||
+    (coordsMatch(p.a, cb) && coordsMatch(p.b, ca))
+  );
+}
+
 // Merge LineString coordinate arrays whose endpoints lie within `toleranceKm`
-// of each other, repeatedly, until no more merges are possible.
-function stitchLines(lines, toleranceKm) {
+// of each other, repeatedly, until no more merges are possible. Any pair of
+// endpoints named in `manualJoinPairs` is force-merged regardless of distance.
+function stitchLines(lines, toleranceKm, manualJoinPairs) {
   let segments = lines.map(l => l.geometry.coordinates.map(c => c.slice()));
   const originalCount = segments.length;
-  const gaps = []; // { a: [lon,lat], b: [lon,lat], distKm } — the joined endpoint pair at each merge
+  const gaps = []; // { a: [lon,lat], b: [lon,lat], distKm, manual } — the joined endpoint pair at each merge
   let merged = true;
   while (merged) {
     merged = false;
@@ -322,19 +354,22 @@ function stitchLines(lines, toleranceKm) {
         const aStart = a[0], aEnd = a[a.length - 1];
         const bStart = b[0], bEnd = b[b.length - 1];
         const candidates = [
-          { d: distKm(aEnd, bStart), type: 'endStart' },
-          { d: distKm(aEnd, bEnd), type: 'endEnd' },
-          { d: distKm(aStart, bStart), type: 'startStart' },
-          { d: distKm(aStart, bEnd), type: 'startEnd' },
-        ].sort((x, y) => x.d - y.d);
-        const best = candidates[0];
-        if (best.d <= toleranceKm) {
-          let newSeg, gapA, gapB;
-          if (best.type === 'endStart') { newSeg = a.concat(b.slice(1)); gapA = aEnd; gapB = bStart; }
-          else if (best.type === 'endEnd') { newSeg = a.concat(b.slice(0, -1).reverse()); gapA = aEnd; gapB = bEnd; }
-          else if (best.type === 'startStart') { newSeg = a.slice().reverse().concat(b.slice(1)); gapA = aStart; gapB = bStart; }
-          else { newSeg = b.concat(a.slice(1)); gapA = aStart; gapB = bEnd; }
-          gaps.push({ a: gapA.slice(), b: gapB.slice(), distKm: best.d });
+          { d: distKm(aEnd, bStart), type: 'endStart', ca: aEnd, cb: bStart },
+          { d: distKm(aEnd, bEnd), type: 'endEnd', ca: aEnd, cb: bEnd },
+          { d: distKm(aStart, bStart), type: 'startStart', ca: aStart, cb: bStart },
+          { d: distKm(aStart, bEnd), type: 'startEnd', ca: aStart, cb: bEnd },
+        ];
+        const manualHit = candidates.find(c => findManualJoin(manualJoinPairs, c.ca, c.cb));
+        candidates.sort((x, y) => x.d - y.d);
+        const best = manualHit || candidates[0];
+        const isManual = !!manualHit;
+        if (isManual || best.d <= toleranceKm) {
+          let newSeg;
+          if (best.type === 'endStart') newSeg = a.concat(b.slice(1));
+          else if (best.type === 'endEnd') newSeg = a.concat(b.slice(0, -1).reverse());
+          else if (best.type === 'startStart') newSeg = a.slice().reverse().concat(b.slice(1));
+          else newSeg = b.concat(a.slice(1));
+          gaps.push({ a: best.ca.slice(), b: best.cb.slice(), distKm: best.d, manual: isManual });
           segments.splice(j, 1);
           segments.splice(i, 1);
           segments.push(newSeg);
@@ -363,19 +398,114 @@ function clearStitchGapLayers() {
   stitchGapLayers = [];
 }
 
+// ---------------- Manual stitch ----------------
+
+// Finds the single closest line endpoint (start or end of any current line)
+// to a click, regardless of which line's rendered path was actually hit —
+// same "snap to the globally nearest thing" pattern used elsewhere in the app.
+function nearestEndpoint(latlng) {
+  const clickPt = [latlng.lng, latlng.lat];
+  let best = null, bestDist = Infinity;
+  allLines.forEach(line => {
+    const coords = line.geometry.coordinates;
+    [coords[0], coords[coords.length - 1]].forEach(coord => {
+      const d = distKm(clickPt, coord);
+      if (d < bestDist) { bestDist = d; best = coord; }
+    });
+  });
+  return best;
+}
+
+function clearManualStitchPickMarker() {
+  if (manualStitchPickMarker) { map.removeLayer(manualStitchPickMarker); manualStitchPickMarker = null; }
+}
+
+function updateManualStitchStatus() {
+  const el = document.getElementById('manualStitchStatus');
+  if (!manualStitchActive) {
+    el.textContent = '';
+    return;
+  }
+  el.textContent = manualStitchFirst
+    ? 'First endpoint picked — click the endpoint you want to join it to.'
+    : 'Manual stitch active — click a loose line endpoint to begin a join (normal measuring clicks are paused).';
+}
+
+function renderManualJoinList() {
+  const wrap = document.getElementById('manualJoinListWrap');
+  if (manualJoinPairs.length === 0) { wrap.innerHTML = ''; return; }
+  let html = '<div class="hint" style="margin-top:8px;">Manual joins:</div>';
+  manualJoinPairs.forEach((p, i) => {
+    const d = distKm(p.a, p.b) * 1000;
+    html += `<div style="display:flex; align-items:center; gap:6px; margin-top:4px;">
+      <span style="font-size:11px; color:#8b93a1; flex:1;">Join ${i + 1}: ${d.toFixed(1)} m apart</span>
+      <button class="secondary manualJoinRemoveBtn" data-idx="${i}" style="width:auto; margin:0; padding:2px 8px;">✕</button>
+    </div>`;
+  });
+  wrap.innerHTML = html;
+  document.querySelectorAll('.manualJoinRemoveBtn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const idx = parseInt(e.currentTarget.dataset.idx, 10);
+      manualJoinPairs.splice(idx, 1);
+      runStitch();
+    });
+  });
+}
+
+function startManualStitch() {
+  manualStitchActive = true;
+  manualStitchFirst = null;
+  clearManualStitchPickMarker();
+  document.getElementById('manualStitchBtn').textContent = 'Stop Manual Stitch';
+  document.getElementById('manualStitchBtn').classList.add('danger');
+  updateManualStitchStatus();
+}
+
+function stopManualStitch() {
+  manualStitchActive = false;
+  manualStitchFirst = null;
+  clearManualStitchPickMarker();
+  const btn = document.getElementById('manualStitchBtn');
+  if (btn) { btn.textContent = 'Start Manual Stitch'; btn.classList.remove('danger'); }
+  updateManualStitchStatus();
+}
+
+function handleManualStitchClick(latlng) {
+  const coord = nearestEndpoint(latlng);
+  if (!coord) return;
+
+  if (!manualStitchFirst) {
+    manualStitchFirst = { coord };
+    manualStitchPickMarker = L.circleMarker([coord[1], coord[0]], {
+      radius: 8, color: '#fff', weight: 2, fillColor: '#22d3ee', fillOpacity: 1
+    }).addTo(map);
+    updateManualStitchStatus();
+    return;
+  }
+
+  if (coordsMatch(manualStitchFirst.coord, coord)) return; // same endpoint clicked twice
+
+  manualJoinPairs.push({ a: manualStitchFirst.coord.slice(), b: coord.slice() });
+  manualStitchFirst = null;
+  clearManualStitchPickMarker();
+  updateManualStitchStatus();
+  runStitch();
+}
+
 function drawStitchGaps(gaps) {
   gaps.forEach(g => {
     const gapM = g.distKm * 1000;
+    const label = g.manual ? `Manual join: ${gapM.toFixed(2)} m` : `Stitched gap: ${gapM.toFixed(2)} m`;
     const line = L.polyline(
       [[g.a[1], g.a[0]], [g.b[1], g.b[0]]],
       { color: '#d946ef', weight: 4, opacity: 0.95, dashArray: '3,7' }
-    ).bindTooltip(`Stitched gap: ${gapM.toFixed(2)} m`, { sticky: true });
+    ).bindTooltip(label, { sticky: true });
     line.addTo(map);
     stitchGapLayers.push(line);
     [g.a, g.b].forEach(coord => {
       const marker = L.circleMarker([coord[1], coord[0]], {
         radius: 5, color: '#fff', weight: 1.5, fillColor: '#d946ef', fillOpacity: 1
-      }).bindTooltip(`Stitched gap: ${gapM.toFixed(2)} m`, { sticky: true });
+      }).bindTooltip(label, { sticky: true });
       marker.addTo(map);
       stitchGapLayers.push(marker);
     });
@@ -386,17 +516,19 @@ function runStitch() {
   if (rawLines.length === 0) return;
   clearStitchGapLayers();
   const tolKm = stitchToleranceKm();
-  const result = stitchLines(rawLines, tolKm);
+  const result = stitchLines(rawLines, tolKm, manualJoinPairs);
   allLines = result.lines;
   const mergedAway = result.originalCount - result.finalCount;
-  const flaggedGaps = result.gaps.filter(g => g.distKm * 1000 >= STITCH_GAP_HIGHLIGHT_MIN_M);
+  const flaggedGaps = result.gaps.filter(g => g.manual || g.distKm * 1000 >= STITCH_GAP_HIGHLIGHT_MIN_M);
   drawStitchGaps(flaggedGaps);
+  const manualCount = result.gaps.filter(g => g.manual).length;
   document.getElementById('stitchStatus').innerHTML = mergedAway > 0
-    ? `<span class="badge">Stitched ${result.originalCount} segment(s) into ${result.finalCount} continuous line(s)${flaggedGaps.length ? ` — ${flaggedGaps.length} discontinuity(ies) bridged, highlighted in purple` : ''}</span>`
+    ? `<span class="badge">Stitched ${result.originalCount} segment(s) into ${result.finalCount} continuous line(s)${flaggedGaps.length ? ` — ${flaggedGaps.length} discontinuity(ies) bridged${manualCount ? ` (${manualCount} manual)` : ''}, highlighted in purple` : ''}</span>`
     : `<span class="badge">No segments needed stitching (${result.finalCount} line(s) already separate)</span>`;
   // line references changed, so any in-progress selection is now stale
   resetQuickPoints();
   clearTrace();
+  renderManualJoinList();
 }
 
 function clearMap() {
@@ -405,6 +537,8 @@ function clearMap() {
   allLines = [];
   clearStitchGapLayers();
   clearUploadedStationPins();
+  manualJoinPairs = [];
+  stopManualStitch();
   resetQuickPoints();
   clearTrace();
   document.getElementById('stitchStatus').innerHTML = '';
@@ -531,6 +665,7 @@ function clearTrace() {
 
 function setMode(newMode) {
   mode = newMode;
+  stopManualStitch();
   document.getElementById('quickSection').style.display = mode === 'quick' ? 'block' : 'none';
   document.getElementById('traceSection').style.display = mode === 'trace' ? 'block' : 'none';
   document.getElementById('modeQuickBtn').classList.toggle('active', mode === 'quick');
@@ -597,7 +732,9 @@ function nearestOnAnyLine(latlng) {
 }
 
 function handleMapClick(latlng) {
-  if (mode === 'quick') {
+  if (manualStitchActive) {
+    handleManualStitchClick(latlng);
+  } else if (mode === 'quick') {
     handleQuickClick(latlng);
   } else {
     handleTraceClick(latlng);
@@ -746,6 +883,7 @@ function updateTraceButtons() {
 }
 
 function startTrace() {
+  stopManualStitch();
   clearTrace();
   traceActive = true;
   updateTraceButtons();
@@ -1288,6 +1426,15 @@ document.getElementById('toggleGpsBtn').addEventListener('click', toggleGpsVisib
 document.getElementById('clearGpsBtn').addEventListener('click', clearGps);
 
 document.getElementById('restitchBtn').addEventListener('click', runStitch);
+
+document.getElementById('manualStitchBtn').addEventListener('click', () => {
+  if (manualStitchActive) stopManualStitch(); else startManualStitch();
+});
+document.getElementById('clearManualJoinsBtn').addEventListener('click', () => {
+  manualJoinPairs = [];
+  stopManualStitch();
+  runStitch();
+});
 
 document.getElementById('modeQuickBtn').addEventListener('click', () => setMode('quick'));
 document.getElementById('modeTraceBtn').addEventListener('click', () => setMode('trace'));

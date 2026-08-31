@@ -159,7 +159,7 @@
 
   <div class="section">
     <label>Manual stitch</label>
-    <div class="hint">For gaps too large for the tolerance above: click "Start Manual Stitch", then click one loose line endpoint, then click the endpoint you want it joined to. Repeat for as many pairs as needed — manual joins are kept even when you change the tolerance or click "Re-stitch Segments", until you remove them below.</div>
+    <div class="hint">For gaps too large for the tolerance above: click "Start Manual Stitch", then click anywhere on one line, then click anywhere on the line you want it joined to (or click the same line again to close it into a loop) — no need to hit an exact endpoint, the nearest matching pair of ends is joined automatically. Repeat for as many pairs as needed — manual joins are kept even when you change the tolerance or click "Re-stitch Segments", until you remove them below.</div>
     <button id="manualStitchBtn">Start Manual Stitch</button>
     <div class="status" id="manualStitchStatus"></div>
     <div id="manualJoinListWrap"></div>
@@ -226,7 +226,7 @@
     <div><span class="line" style="border-color:#60a5fa;"></span> Track geometry (each continuous line gets its own color — a color change marks an unbridged discontinuity)</div>
     <div><span class="line" style="border-color:#d946ef; border-top-style:dashed;"></span> Stitched discontinuity (auto or manual)</div>
     <div><span class="dot" style="background:#8b93a1;"></span> Loose end (color matches its line) — not yet joined to anything</div>
-    <div><span class="dot" style="background:#22d3ee;"></span> Manual stitch: first endpoint picked</div>
+    <div><span class="line" style="border-color:#22d3ee;"></span> Manual stitch: first line picked</div>
     <div><span class="dot" style="background:#22c55e;"></span> Start point</div>
     <div><span class="dot" style="background:#ef4444;"></span> End point</div>
     <div><span class="dot" style="background:#3b82f6;"></span> Trace waypoint</div>
@@ -287,7 +287,7 @@ let uploadedStationMarkers = []; // stations read directly from an uploaded file
 // --- manual stitch state ---
 let manualJoinPairs = [];       // { a: [lon,lat], b: [lon,lat] } — user-declared endpoint pairs, force-merged
 let manualStitchActive = false;
-let manualStitchFirst = null;   // { coord } of the first endpoint picked, awaiting a second click
+let manualStitchFirst = null;   // { line } of the first line picked, awaiting a second click
 let manualStitchPickMarker = null;
 
 // ---------------- Sidebar collapse ----------------
@@ -418,22 +418,24 @@ function clearStitchGapLayers() {
 
 // ---------------- Manual stitch ----------------
 
-// Picks whichever end (start or end) of `line` is nearer to the click. Used
-// instead of a global nearest-endpoint search because at a junction with
-// several close, near-parallel lines (e.g. a rail depot), searching across
-// ALL lines' endpoints is ambiguous and can silently pick the wrong line's
-// endpoint. Since every click always arrives already tied to the specific
-// rendered line it landed on (see renderStitchedLines), restricting to that
-// exact line removes the ambiguity entirely.
-function nearestEndpointOnLine(latlng, line) {
-  const clickPt = [latlng.lng, latlng.lat];
+function lineEnds(line) {
   const coords = line.geometry.coordinates;
-  const start = coords[0], end = coords[coords.length - 1];
-  return distKm(clickPt, start) <= distKm(clickPt, end) ? start : end;
+  return [coords[0], coords[coords.length - 1]];
 }
 
 function clearManualStitchPickMarker() {
   if (manualStitchPickMarker) { map.removeLayer(manualStitchPickMarker); manualStitchPickMarker = null; }
+}
+
+// Highlights the whole picked line, not a single point — two loose ends that
+// need joining are often only meters apart and can visually overlap even at
+// max zoom, making an exact-endpoint click nearly impossible to land. Picking
+// a line by clicking anywhere on it, then letting the join auto-resolve to
+// the nearest matching pair of ends, sidesteps that entirely.
+function highlightManualStitchPick(line) {
+  clearManualStitchPickMarker();
+  const latlngs = line.geometry.coordinates.map(c => [c[1], c[0]]);
+  manualStitchPickMarker = L.polyline(latlngs, { color: '#22d3ee', weight: 8, opacity: 0.55 }).addTo(map);
 }
 
 function updateManualStitchStatus() {
@@ -443,8 +445,8 @@ function updateManualStitchStatus() {
     return;
   }
   el.textContent = manualStitchFirst
-    ? 'First endpoint picked — click the endpoint you want to join it to.'
-    : 'Manual stitch active — click a loose line endpoint to begin a join (normal measuring clicks are paused).';
+    ? 'First line picked — click the other line you want it joined to (or click the same line again to close it into a loop).'
+    : 'Manual stitch active — click anywhere on a line to begin a join (normal measuring clicks are paused).';
 }
 
 function renderManualJoinList() {
@@ -488,21 +490,33 @@ function stopManualStitch() {
 
 function handleManualStitchClick(latlng, clickedLine) {
   if (!clickedLine) return;
-  const coord = nearestEndpointOnLine(latlng, clickedLine);
-  if (!coord) return;
 
   if (!manualStitchFirst) {
-    manualStitchFirst = { coord };
-    manualStitchPickMarker = L.circleMarker([coord[1], coord[0]], {
-      radius: 8, color: '#fff', weight: 2, fillColor: '#22d3ee', fillOpacity: 1
-    }).addTo(map);
+    manualStitchFirst = { line: clickedLine };
+    highlightManualStitchPick(clickedLine);
     updateManualStitchStatus();
     return;
   }
 
-  if (coordsMatch(manualStitchFirst.coord, coord)) return; // same endpoint clicked twice
+  const line1 = manualStitchFirst.line;
+  const line2 = clickedLine;
+  const ends1 = lineEnds(line1);
+  const ends2 = (line1 === line2) ? ends1 : lineEnds(line2);
 
-  manualJoinPairs.push({ a: manualStitchFirst.coord.slice(), b: coord.slice() });
+  // Auto-resolve to whichever pair of ends (one from each line) is closest —
+  // that's the pair the user actually means to join. Clicking the same line
+  // twice pairs its own two ends together, closing it into a loop.
+  let best = null, bestDist = Infinity;
+  ends1.forEach(e1 => {
+    ends2.forEach(e2 => {
+      if (e1 === e2) return; // don't pair an endpoint with itself
+      const d = distKm(e1, e2);
+      if (d < bestDist) { bestDist = d; best = { a: e1, b: e2 }; }
+    });
+  });
+  if (!best) { manualStitchFirst = null; clearManualStitchPickMarker(); updateManualStitchStatus(); return; }
+
+  manualJoinPairs.push({ a: best.a.slice(), b: best.b.slice() });
   manualStitchFirst = null;
   clearManualStitchPickMarker();
   updateManualStitchStatus();
@@ -583,7 +597,7 @@ function renderLineEndpointMarkers() {
     [coords[0], coords[coords.length - 1]].forEach(coord => {
       const marker = L.circleMarker([coord[1], coord[0]], {
         radius: 6, color: '#fff', weight: 2, fillColor: color, fillOpacity: 1, interactive: false
-      }).bindTooltip('Loose end — use Manual Stitch to join it to another', { direction: 'top', opacity: 0.85 });
+      }).bindTooltip('Loose end — in Manual Stitch, click anywhere on this line to join it to another', { direction: 'top', opacity: 0.85 });
       marker.addTo(map);
       lineEndpointMarkers.push(marker);
     });

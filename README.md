@@ -22,7 +22,7 @@ Features:
 - Tabbed, collapsible sidebar
 - Stations show as permanent labeled pin markers on the map, whether detected from an uploaded file's from/to properties or built via a Path Trace
 - Import raw GPS points (GeoJSON, NDJSON, GPX, or CSV) and view them superimposed on the map and path, with a toggle to show/hide them and a way to clear them independently of the loaded path
-- Auto-stitches disjointed line segments (e.g. a track split into multiple features) into continuous paths whose endpoints are within a configurable tolerance, so measurements can cross between them; re-run stitching with a different tolerance at any time via "Re-stitch Segments"; bridged discontinuities are highlighted on the map in purple
+- Auto-stitches disjointed line segments (e.g. a track split into multiple features) into continuous paths whose endpoints are within a configurable tolerance, so measurements can cross between them; re-run stitching with a different tolerance at any time via "Re-stitch Segments"; bridged discontinuities are highlighted on the map in purple; each resulting continuous line is drawn in its own color, so a color change along the track marks exactly where an unbridged discontinuity remains
 - Manual stitch mode for gaps too large for the auto tolerance: click "Start Manual Stitch", then click two loose line endpoints to force-join them; manual joins persist through re-stitching and can be removed individually
 - Quick 2-point along-path and straight-line (chord) distance measurement
 - Multi-point path trace across stitched segments, with loop-closing snap and a running/total distance

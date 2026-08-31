@@ -223,7 +223,7 @@
   </div>
 
   <div class="legend">
-    <div><span class="line" style="border-color:#3b82f6;"></span> Track geometry</div>
+    <div><span class="line" style="border-color:#60a5fa;"></span> Track geometry (each continuous line gets its own color — a color change marks an unbridged discontinuity)</div>
     <div><span class="line" style="border-color:#d946ef; border-top-style:dashed;"></span> Stitched discontinuity (auto or manual)</div>
     <div><span class="dot" style="background:#22d3ee;"></span> Manual stitch: first endpoint picked</div>
     <div><span class="dot" style="background:#22c55e;"></span> Start point</div>
@@ -512,18 +512,48 @@ function drawStitchGaps(gaps) {
   });
 }
 
+// Distinct hues cycled across the current continuous lines, chosen to stay
+// clear of colors already used for markers/legend items elsewhere in the app
+// (green/red endpoints, orange GPS points, yellow stations, purple gaps, cyan
+// manual-stitch pick) so a color change reads as "this is a different line,"
+// not "this is some other kind of marker."
+const STITCHED_LINE_COLORS = ['#60a5fa', '#f472b6', '#a3e635', '#818cf8', '#2dd4bf', '#fb7185', '#38bdf8'];
+
+let stitchedLineLayers = [];
+
+function clearStitchedLineLayers() {
+  stitchedLineLayers.forEach(l => map.removeLayer(l));
+  stitchedLineLayers = [];
+}
+
+// Renders each of the current continuous lines (post auto+manual stitch) in
+// its own color, so a color change along the track marks exactly where a
+// discontinuity remains — a visual cue for where manual stitching is needed.
+function renderStitchedLines() {
+  clearStitchedLineLayers();
+  allLines.forEach((line, idx) => {
+    const color = STITCHED_LINE_COLORS[idx % STITCHED_LINE_COLORS.length];
+    const latlngs = line.geometry.coordinates.map(c => [c[1], c[0]]);
+    const layer = L.polyline(latlngs, { color, weight: 4, opacity: 0.9 });
+    layer.on('click', (e) => handleMapClick(e.latlng));
+    layer.addTo(map);
+    stitchedLineLayers.push(layer);
+  });
+}
+
 function runStitch() {
   if (rawLines.length === 0) return;
   clearStitchGapLayers();
   const tolKm = stitchToleranceKm();
   const result = stitchLines(rawLines, tolKm, manualJoinPairs);
   allLines = result.lines;
+  renderStitchedLines();
   const mergedAway = result.originalCount - result.finalCount;
   const flaggedGaps = result.gaps.filter(g => g.manual || g.distKm * 1000 >= STITCH_GAP_HIGHLIGHT_MIN_M);
   drawStitchGaps(flaggedGaps);
   const manualCount = result.gaps.filter(g => g.manual).length;
   document.getElementById('stitchStatus').innerHTML = mergedAway > 0
-    ? `<span class="badge">Stitched ${result.originalCount} segment(s) into ${result.finalCount} continuous line(s)${flaggedGaps.length ? ` — ${flaggedGaps.length} discontinuity(ies) bridged${manualCount ? ` (${manualCount} manual)` : ''}, highlighted in purple` : ''}</span>`
+    ? `<span class="badge">Stitched ${result.originalCount} segment(s) into ${result.finalCount} continuous line(s)${flaggedGaps.length ? ` — ${flaggedGaps.length} discontinuity(ies) bridged${manualCount ? ` (${manualCount} manual)` : ''}, highlighted in purple` : ''}${result.finalCount > 1 ? ` — each line is drawn in its own color; a color change marks a remaining discontinuity` : ''}</span>`
     : `<span class="badge">No segments needed stitching (${result.finalCount} line(s) already separate)</span>`;
   // line references changed, so any in-progress selection is now stale
   resetQuickPoints();
@@ -532,7 +562,8 @@ function runStitch() {
 }
 
 function clearMap() {
-  if (geoLayer) { map.removeLayer(geoLayer); geoLayer = null; }
+  geoLayer = null;
+  clearStitchedLineLayers();
   rawLines = [];
   allLines = [];
   clearStitchGapLayers();
@@ -690,12 +721,11 @@ function loadGeoJSON(data, sourceLabel) {
       }
     });
 
-    geoLayer = L.geoJSON(data, {
-      style: { color: '#3b82f6', weight: 3, opacity: 0.9 },
-      onEachFeature: (feature, layer) => {
-        layer.on('click', (e) => handleMapClick(e.latlng));
-      }
-    }).addTo(map);
+    // Kept off the map deliberately — its only jobs are bounds-fitting below
+    // and the "!geoLayer" has-a-path-loaded check elsewhere. The actual
+    // visible/clickable track is drawn per-stitched-line by renderStitchedLines()
+    // (called from runStitch() further down), so gaps show up as color changes.
+    geoLayer = L.geoJSON(data);
 
     if (geoLayer.getBounds().isValid()) {
       map.fitBounds(geoLayer.getBounds(), { padding: [30, 30] });

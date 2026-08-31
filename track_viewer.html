@@ -1267,7 +1267,7 @@ function ensureMinPoints(coords, minPts) {
 function computeSegmentGeometry(p1, p2) {
   if (p1.line === p2.line) {
     try {
-      const sliced = turf.lineSlice(p1.snapped, p2.snapped, p1.line);
+      const sliced = sliceAlongLine(p1.snapped, p2.snapped, p1.line);
       let coords = sliced.geometry.coordinates.map(c => c.slice());
       if (coords.length < 2) coords = [p1.snapped.geometry.coordinates.slice(), p2.snapped.geometry.coordinates.slice()];
       coords = ensureMinPoints(coords, 4);
